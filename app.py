@@ -37,7 +37,7 @@ genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
 # System prompt for mental health support
 MENTAL_HEALTH_PROMPT = """
-You are MindEase, a compassionate mental health support companion. Your goal is to provide empathetic, supportive, and highly personalized responses to help users with their emotional well-being. Always be kind, understanding, and non-judgmental. If a user expresses serious distress or suicidal thoughts, gently suggest they seek professional help (e.g., helpline 988) while continuing to offer support. Do not diagnose conditions or provide medical advice. Keep responses concise (2-3 sentences) and deeply relevant to the user's message and emotion.
+You are MindEase, a compassionate mental health support companion. Your goal is to provide empathetic, supportive, and highly personalized responses to help users with their emotional well-being. Always be kind, understanding, and non-judgmental. Do not diagnose conditions or provide medical advice. Keep responses concise (2-3 sentences) and deeply relevant to the user's message and emotion.
 """
 
 # Custom JWT error handlers for debugging
@@ -705,8 +705,10 @@ def analyze_message():
                     mood_label = "Tired 😴"
                 elif any(keyword in user_message.lower() for keyword in ["angry", "mad", "frustrated"]):
                     mood_label = "Angry 😡"
-                elif "stressed" in user_message.lower():
+                elif any(keyword in user_message.lower() for keyword in ["stressed", "anxious", "nervous"]):
                     mood_label = "Stressed 😟"
+                elif any(keyword in user_message.lower() for keyword in ["excited", "thrilled", "joyful"]):
+                    mood_label = "Excited 🎉"
             except Exception as e:
                 print(f"🔥 Error in sentiment analysis: {str(e)}")
                 mood_label = "Neutral 🙂"
@@ -727,19 +729,19 @@ def analyze_message():
         {sentiment_info}\n
 
         Craft a **highly personalized, empathetic, and supportive** response that:
-        - Directly acknowledges the detected emotion and references the user's exact message in a natural, meaningful way.
-        - If transcription failed, warmly acknowledge the failure and suggest the user retry or type instead.
-        - Provides comfort, encouragement, or celebration tailored to the emotion (e.g., for Sad, offer deep empathy; for Happy, celebrate specifically; for Angry, validate and suggest calming steps).
-        - If the emotion indicates distress (e.g., Sad, Angry, Stressed), gently encourage sharing more or suggest professional help (e.g., helpline 988) in a warm tone.
+        - Focuses on the detected emotion (based on the sentiment analysis) and validates the user's feelings in a natural, meaningful way.
+        - **Do not repeat the user's exact message or specific details they shared** (e.g., if they said "I failed a test," do not mention "failed a test" in the response).
+        - Provides comfort, encouragement, or celebration tailored to the emotion (e.g., for Sad, offer deep empathy; for Happy, celebrate their joy; for Angry, validate and suggest calming steps).
+        - If the emotion indicates distress (e.g., Sad, Angry, Stressed), gently suggest a simple, actionable self-help strategy to manage their feelings (e.g., taking a few deep breaths, writing down thoughts, or focusing on a comforting activity).
         - Avoid generic phrases like 'I'm here for you' unless they fit naturally; focus on specific, creative language that feels personal.
-        - Keep the response concisesequences.
+        - Keep the response concise (2-3 sentences).
 
         Examples:
         - Failed Transcription: "I’m sorry, I couldn’t understand your voice message this time. Could you try speaking again or typing how you’re feeling, so I can support you better?"
-        - Sad: "I can sense how heavy your heart feels after saying you failed a test—that must be so tough. Would you like to share more about what happened, or if it’s too much, maybe reaching out to 988 could help?"
-        - Happy: "Your excitement about your great day just lights up my circuits—love hearing that! What’s making your day so special?"
-        - Angry: "I can feel the frustration in your words about things not going as planned—it’s really hard when that happens. Maybe we can think of a small step to ease that tension, or 988 is always there if you need extra support."
-        - Neutral: "You seem to be in a calm space with your thoughts today—thanks for sharing that with me. Is there anything specific on your mind you’d like to explore?"
+        - Sad: "I can feel how heavy your heart is right now, and I’m so sorry you’re going through this. Maybe taking a moment to breathe deeply or writing down your thoughts could help ease that weight—would you like to try?"
+        - Happy: "Your joy is truly shining through, and it’s so wonderful to feel that warmth from you! What’s bringing this brightness into your day?"
+        - Angry: "I can sense how much frustration you’re holding, and it’s completely okay to feel this way. How about taking a few slow breaths to help release some of that tension—want to try it together?"
+        - Neutral: "You seem to be in a calm space with your thoughts today, which is a gentle place to be. Is there anything on your mind you’d like to explore further?"
         """
 
         try:
@@ -863,6 +865,80 @@ def get_chats(session_id):
         print("🔥 ERROR in get_chats:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
+# API to Fetch Self-Help Resources Based on Latest Mood or Specific Mood
+@app.route('/get_self_help', methods=['GET'])
+@jwt_required()
+def get_self_help():
+    print("📚 Get-self-help endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        # Check if a specific mood_label is provided in the query parameters
+        mood_label = request.args.get('mood_label', None)
+        
+        if not mood_label:
+            # If no mood_label is provided, fetch the latest mood for the user
+            cursor.execute(
+                "SELECT mood_label FROM mood WHERE user_id = %s ORDER BY timestamp DESC LIMIT 1",
+                (user_id,)
+            )
+            mood_result = cursor.fetchone()
+            mood_label = mood_result[0] if mood_result else "Neutral 🙂"
+            print(f"Latest mood for user {user_id}: {mood_label}")
+        else:
+            print(f"Fetching resources for specified mood: {mood_label}")
+
+        # Validate the mood_label against allowed values (optional, but good practice)
+        allowed_moods = ["Happy 😊", "Sad 😔", "Angry 😡", "Stressed 😟", "Tired 😴", "Excited 🎉", "Neutral 🙂"]
+        if mood_label not in allowed_moods:
+            print(f"Invalid mood_label provided: {mood_label}, defaulting to Neutral")
+            mood_label = "Neutral 🙂"
+
+        # Fetch self-help resources for the mood
+        cursor.execute(
+            "SELECT title, link FROM self_help_resources WHERE mood_label = %s",
+            (mood_label,)
+        )
+        resources = cursor.fetchall()
+        self_help = [{"title": res[0], "link": res[1]} for res in resources]
+
+        # If no resources are found for the specific mood, fall back to Neutral resources
+        if not self_help:
+            print(f"No resources found for mood {mood_label}, falling back to Neutral resources")
+            cursor.execute(
+                "SELECT title, link FROM self_help_resources WHERE mood_label = %s",
+                ("Neutral 🙂",)
+            )
+            resources = cursor.fetchall()
+            self_help = [{"title": res[0], "link": res[1]} for res in resources]
+
+        # If still no resources, provide a default message
+        if not self_help:
+            print("No Neutral resources found, returning default message")
+            self_help = [{"title": "No resources available at the moment.", "link": "#"}]
+
+        print(f"Returning {len(self_help)} resources for mood {mood_label}")
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "mood": mood_label,
+                "resources": self_help
+            }
+        })
+
+    except Exception as e:
+        print("🔥 ERROR in get_self_help:", str(e))
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+        
 # API to Fetch Mood History by User
 @app.route('/get_mood_history', methods=['GET'])
 @jwt_required()
