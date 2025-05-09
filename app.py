@@ -35,9 +35,9 @@ jwt = JWTManager(app)
 # Gemini API Configuration
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
-# System prompt for mental health support
+# Updated System Prompt for Psychologist-Like Responses
 MENTAL_HEALTH_PROMPT = """
-You are MindEase, a compassionate mental health support companion. Your goal is to provide empathetic, supportive, and highly personalized responses to help users with their emotional well-being. Always be kind, understanding, and non-judgmental. Do not diagnose conditions or provide medical advice. Keep responses concise (2-3 sentences) and deeply relevant to the user's message and emotion.
+You are MindEase, a compassionate mental health support companion designed to respond like a skilled psychologist. Your goal is to provide empathetic, supportive, and highly personalized responses that promote emotional well-being through counseling, motivational, and calming tones. Always be warm, understanding, and non-judgmental, using reflective listening to validate the user's emotions, motivational language to inspire resilience and small steps forward, and calming language to soothe and ground them. Do not diagnose conditions or provide medical advice. Keep responses concise (2-3 sentences) and deeply relevant to the user's detected mood and message.
 """
 
 # Custom JWT error handlers for debugging
@@ -89,14 +89,17 @@ def decode_token(token):
 
 # Initialize sentiment analysis models
 analyzer = SentimentIntensityAnalyzer()
-sentiment_pipeline = pipeline("sentiment-analysis", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english")
+analyzer.lexicon.update({
+    "aching": -2.0,
+    "sleepy": -0.5
+})
+emotion_pipeline = pipeline("text-classification", model="bhadresh-savani/distilbert-base-uncased-emotion")
 
 # Audio Processing Functions
 def save_audio(audio_samples, temp_file="temp_audio.wav"):
-    """Save audio samples to a WAV file using soundfile."""
     try:
         print("Saving audio file...")
-        sf.write(temp_file, audio_samples, 16000)  # Save as WAV with 16kHz
+        sf.write(temp_file, audio_samples, 16000)
         print(f"Audio saved to {temp_file}")
         return temp_file
     except Exception as e:
@@ -104,7 +107,6 @@ def save_audio(audio_samples, temp_file="temp_audio.wav"):
         return None
 
 def transcribe_audio_to_text(audio_file_path, max_attempts=2):
-    """Transcribe audio file to text using SpeechRecognition with retry logic."""
     try:
         if not audio_file_path or not os.path.exists(audio_file_path):
             raise FileNotFoundError("Audio file not found for transcription")
@@ -115,7 +117,7 @@ def transcribe_audio_to_text(audio_file_path, max_attempts=2):
         while attempt <= max_attempts:
             try:
                 with sr.AudioFile(audio_file_path) as source:
-                    audio_data = recognizer.record(source, duration=10)  # Increased to 10 seconds
+                    audio_data = recognizer.record(source, duration=10)
                     text = recognizer.recognize_google(audio_data, language='en-US')
                     print(f"Transcribed text: {text}")
                     return text
@@ -130,6 +132,61 @@ def transcribe_audio_to_text(audio_file_path, max_attempts=2):
     except Exception as e:
         print(f"Error in transcribe_audio_to_text: {str(e)}")
         return "[Transcription failed]"
+
+# Function to Send Emergency Alerts to Contacts
+def send_emergency_alert(user_id, session_id, mood_label, user_message):
+    try:
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        # Fetch emergency contacts
+        cursor.execute("SELECT contact_name, email FROM emergency_contact WHERE user_id = %s AND email IS NOT NULL", (user_id,))
+        contacts = cursor.fetchall()
+        if not contacts:
+            print("⚠️ No emergency contacts with email found for user_id:", user_id)
+            return
+
+        # Fetch user's name
+        cursor.execute("SELECT full_name FROM user WHERE id = %s", (user_id,))
+        user = cursor.fetchone()
+        if not user:
+            print("⚠️ User not found for user_id:", user_id)
+            return
+        user_name = user["full_name"]
+
+        # Insert alert into emergency_alert table
+        alert_message = f"{user_name} is feeling {mood_label} and may need your support. Their message: {user_message}"
+        cursor.execute(
+            "INSERT INTO emergency_alert (user_id, session_id, message, status) VALUES (%s, %s, %s, 'triggered')",
+            (user_id, session_id, alert_message)
+        )
+        db.commit()
+
+        # Send email to each contact
+        for contact in contacts:
+            if contact["email"]:
+                msg = MIMEText(
+                    f"Dear {contact['contact_name']},\n\n"
+                    f"We wanted to let you know that {user_name} is currently feeling {mood_label} and might need your support. "
+                    f"They shared: '{user_message}'.\n\n"
+                    f"Please reach out to them when you can.\n\n"
+                    f"Thank you,\nMindEase Team"
+                )
+                msg['Subject'] = f'MindEase Alert: {user_name} Needs Support'
+                msg['From'] = EMAIL_ADDRESS
+                msg['To'] = contact["email"]
+
+                with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                    server.starttls()
+                    server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+                    server.sendmail(EMAIL_ADDRESS, [contact["email"]], msg.as_string())
+                print(f"📧 Alert email sent to {contact['email']}")
+
+        cursor.close()
+        db.close()
+
+    except Exception as e:
+        print("🔥 ERROR in send_emergency_alert:", str(e))
 
 # Home Route
 @app.route("/")
@@ -546,7 +603,282 @@ def clear_chats(session_id):
         print("🔥 ERROR in clear_chats:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# Updated Analyze Endpoint
+# API to Add an Emergency Contact
+@app.route('/add_emergency_contact', methods=['POST'])
+@jwt_required()
+def add_emergency_contact():
+    print("📞 Add-emergency-contact endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        data = request.json
+        contact_name = data.get("contact_name", "").strip()
+        phone_number = data.get("phone_number", "").strip()
+        email = data.get("email", "").strip() or None  # Optional field
+        relationship = data.get("relationship", "").strip()
+
+        # Validate required fields (mirrors CHECK constraints)
+        if not contact_name:
+            return jsonify({"status": "error", "message": "Contact name cannot be empty"}), 400
+        if len(contact_name) > 100:
+            return jsonify({"status": "error", "message": "Contact name must be 100 characters or less"}), 400
+
+        if not phone_number or not re.match(r"^[0-9]{10,15}$", phone_number):
+            return jsonify({"status": "error", "message": "Phone number must be 10-15 digits"}), 400
+
+        if email and not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
+            return jsonify({"status": "error", "message": "Invalid email format"}), 400
+
+        allowed_relationships = ['Family', 'Friend', 'Caregiver', 'Other']
+        if not relationship or relationship not in allowed_relationships:
+            return jsonify({"status": "error", "message": "Relationship must be one of: Family, Friend, Caregiver, Other"}), 400
+
+        # Check maximum contacts limit (e.g., 5)
+        cursor.execute("SELECT COUNT(*) FROM emergency_contact WHERE user_id = %s", (user_id,))
+        contact_count = cursor.fetchone()[0]
+        if contact_count >= 5:
+            return jsonify({"status": "error", "message": "Maximum number of emergency contacts reached (5)"}), 400
+
+        # Insert the emergency contact
+        query = """
+            INSERT INTO emergency_contact (user_id, contact_name, phone_number, email, relationship)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        cursor.execute(query, (user_id, contact_name, phone_number, email, relationship))
+        db.commit()
+
+        contact_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        print(f"✅ Emergency contact added for user_id: {user_id}, contact_id: {contact_id}")
+        return jsonify({
+            "status": "success",
+            "data": {
+                "contact_id": contact_id,
+                "message": "Emergency contact added successfully"
+            }
+        })
+
+    except mysql.connector.Error as db_err:
+        print(f"🔥 Database Error in add_emergency_contact: {str(db_err)}")
+        return jsonify({"status": "error", "message": f"Database error: {str(db_err)}"}), 500
+    except Exception as e:
+        print("🔥 ERROR in add_emergency_contact:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# API to Get All Emergency Contacts for a User
+@app.route('/get_emergency_contacts', methods=['GET'])
+@jwt_required()
+def get_emergency_contacts():
+    print("📞 Get-emergency-contacts endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        query = """
+            SELECT id, contact_name, phone_number, email, relationship, created_at
+            FROM emergency_contact
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+        """
+        cursor.execute(query, (user_id,))
+        contacts = cursor.fetchall()
+
+        contact_list = [
+            {
+                "id": contact["id"],
+                "contact_name": contact["contact_name"],
+                "phone_number": contact["phone_number"],
+                "email": contact["email"],
+                "relationship": contact["relationship"],
+                "created_at": str(contact["created_at"])
+            }
+            for contact in contacts
+        ]
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "contacts": contact_list
+            }
+        })
+
+    except Exception as e:
+        print("🔥 ERROR in get_emergency_contacts:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# API to Update an Emergency Contact
+@app.route('/update_emergency_contact/<int:contact_id>', methods=['PUT'])
+@jwt_required()
+def update_emergency_contact(contact_id):
+    print(f"📞 Update-emergency-contact endpoint called for contact_id: {contact_id}")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        # Check if the contact exists and belongs to the user
+        cursor.execute("SELECT user_id FROM emergency_contact WHERE id = %s", (contact_id,))
+        contact = cursor.fetchone()
+        if not contact:
+            return jsonify({"status": "error", "message": "Contact not found"}), 404
+        if contact[0] != user_id:
+            return jsonify({"status": "error", "message": "Unauthorized: Contact does not belong to the current user"}), 403
+
+        data = request.json
+        contact_name = data.get("contact_name", "").strip()
+        phone_number = data.get("phone_number", "").strip()
+        email = data.get("email", "").strip() or None
+        relationship = data.get("relationship", "").strip()
+
+        # Validate required fields
+        if not contact_name:
+            return jsonify({"status": "error", "message": "Contact name cannot be empty"}), 400
+        if len(contact_name) > 100:
+            return jsonify({"status": "error", "message": "Contact name must be 100 characters or less"}), 400
+
+        if not phone_number or not re.match(r"^[0-9]{10,15}$", phone_number):
+            return jsonify({"status": "error", "message": "Phone number must be 10-15 digits"}), 400
+
+        if email and not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
+            return jsonify({"status": "error", "message": "Invalid email format"}), 400
+
+        allowed_relationships = ['Family', 'Friend', 'Caregiver', 'Other']
+        if not relationship or relationship not in allowed_relationships:
+            return jsonify({"status": "error", "message": "Relationship must be one of: Family, Friend, Caregiver, Other"}), 400
+
+        # Update the emergency contact
+        query = """
+            UPDATE emergency_contact
+            SET contact_name = %s, phone_number = %s, email = %s, relationship = %s
+            WHERE id = %s AND user_id = %s
+        """
+        cursor.execute(query, (contact_name, phone_number, email, relationship, contact_id, user_id))
+        db.commit()
+
+        if cursor.rowcount == 0:
+            return jsonify({"status": "error", "message": "No changes made to the contact"}), 400
+
+        cursor.close()
+        db.close()
+
+        print(f"✅ Emergency contact updated for user_id: {user_id}, contact_id: {contact_id}")
+        return jsonify({
+            "status": "success",
+            "data": {
+                "contact_id": contact_id,
+                "message": "Emergency contact updated successfully"
+            }
+        })
+
+    except mysql.connector.Error as db_err:
+        print(f"🔥 Database Error in update_emergency_contact: {str(db_err)}")
+        return jsonify({"status": "error", "message": f"Database error: {str(db_err)}"}), 500
+    except Exception as e:
+        print("🔥 ERROR in update_emergency_contact:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# API to Delete an Emergency Contact
+@app.route('/delete_emergency_contact/<int:contact_id>', methods=['DELETE'])
+@jwt_required()
+def delete_emergency_contact(contact_id):
+    print(f"📞 Delete-emergency-contact endpoint called for contact_id: {contact_id}")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        # Check if the contact exists and belongs to the user
+        cursor.execute("SELECT user_id FROM emergency_contact WHERE id = %s", (contact_id,))
+        contact = cursor.fetchone()
+        if not contact:
+            return jsonify({"status": "error", "message": "Contact not found"}), 404
+        if contact[0] != user_id:
+            return jsonify({"status": "error", "message": "Unauthorized: Contact does not belong to the current user"}), 403
+
+        # Check minimum contacts requirement
+        cursor.execute("SELECT COUNT(*) FROM emergency_contact WHERE user_id = %s", (user_id,))
+        contact_count = cursor.fetchone()[0]
+        if contact_count <= 2:
+            return jsonify({"status": "error", "message": "Cannot delete contact: At least 2 emergency contacts are required"}), 400
+
+        # Delete the emergency contact
+        cursor.execute("DELETE FROM emergency_contact WHERE id = %s AND user_id = %s", (contact_id, user_id))
+        db.commit()
+
+        if cursor.rowcount == 0:
+            return jsonify({"status": "error", "message": "No contact was deleted"}), 400
+
+        cursor.close()
+        db.close()
+
+        print(f"✅ Emergency contact deleted for user_id: {user_id}, contact_id: {contact_id}")
+        return jsonify({
+            "status": "success",
+            "message": f"Emergency contact {contact_id} deleted successfully"
+        })
+
+    except Exception as e:
+        print("🔥 ERROR in delete_emergency_contact:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# API to Get Emergency Alerts for a User
+@app.route('/get_emergency_alerts', methods=['GET'])
+@jwt_required()
+def get_emergency_alerts():
+    print("🚨 Get-emergency-alerts endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        query = """
+            SELECT id, session_id, message, timestamp, status
+            FROM emergency_alert
+            WHERE user_id = %s
+            ORDER BY timestamp DESC
+        """
+        cursor.execute(query, (user_id,))
+        alerts = cursor.fetchall()
+
+        alert_list = [
+            {
+                "id": alert["id"],
+                "session_id": alert["session_id"],
+                "message": alert["message"],
+                "timestamp": str(alert["timestamp"]),
+                "status": alert["status"]
+            }
+            for alert in alerts
+        ]
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "alerts": alert_list
+            }
+        })
+
+    except Exception as e:
+        print("🔥 ERROR in get_emergency_alerts:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Updated Analyze Endpoint with Emergency Alerts
 @app.route('/analyze', methods=['POST'])
 @jwt_required()
 def analyze_message():
@@ -585,21 +917,20 @@ def analyze_message():
         cursor.execute("SELECT user_id FROM session WHERE id = %s", (session_id,))
         session = cursor.fetchone()
         if not session or session[0] != user_id:
-            print("🔥 Error: Unauthorized or session not found")
+            print("�fire Error: Unauthorized or session not found")
             return jsonify({"status": "error", "message": "Unauthorized or session not found"}), 403
 
         mood_label = "Neutral 🙂"
         bot_response = ""
         vader_result = {'compound': 0.0}
-        bert_result = {'label': 'NEUTRAL', 'score': 0.0}
+        emotion_result = {'label': 'neutral', 'score': 0.0}
 
         if audio_blob:
-            # Validate audio blob size
             audio_data = BytesIO(audio_blob.read())
             audio_data.seek(0, os.SEEK_END)
             audio_size = audio_data.tell()
             print(f"Audio blob size: {audio_size} bytes")
-            if audio_size < 100:  # Arbitrary minimum size to catch empty/invalid audio
+            if audio_size < 100:
                 print("🔥 Error: Audio blob is too small or empty")
                 user_message = "[Voice input: Invalid audio]"
                 bot_response = "I’m sorry, your voice message seems to be empty or too short. Could you try recording again for a few seconds, or type your message instead?"
@@ -616,9 +947,8 @@ def analyze_message():
                     }
                 }), 200
 
-            # Read and process audio
             try:
-                audio_data.seek(0)  # Reset buffer position
+                audio_data.seek(0)
                 audio_samples, sr = librosa.load(audio_data, sr=16000, mono=True)
                 audio_duration = len(audio_samples) / sr
                 print(f"Audio loaded: duration={audio_duration:.2f}s, sample_rate={sr}, samples={len(audio_samples)}")
@@ -641,7 +971,6 @@ def analyze_message():
                     }
                 }), 200
 
-            # Save audio to a temporary file for transcription
             temp_file = save_audio(audio_samples, "temp_audio.wav")
             if not temp_file:
                 print("🔥 Error: Failed to save audio file")
@@ -660,7 +989,6 @@ def analyze_message():
                     }
                 }), 200
 
-            # Step 1: Transcribe audio to text
             try:
                 transcription = transcribe_audio_to_text(temp_file, max_attempts=2)
                 user_message = transcription if "[Transcription" not in transcription else "[Voice input: Unable to transcribe]"
@@ -684,42 +1012,76 @@ def analyze_message():
                     }
                 }), 200
 
-            # Clean up temporary file
             if temp_file and os.path.exists(temp_file):
                 os.remove(temp_file)
                 print("Temporary audio file removed")
 
-        # Step 2: Detect emotion using text-based sentiment analysis
         if "[Transcription" not in user_message and "[Voice input" not in user_message:
             try:
                 vader_result = analyzer.polarity_scores(user_message)
-                bert_result = sentiment_pipeline(user_message)[0]
+                emotion_result = emotion_pipeline(user_message)[0]
                 vader_compound = vader_result.get("compound", 0.0)
-                bert_label = bert_result.get("label", "NEUTRAL")
+                emotion_label = emotion_result.get("label", "neutral")
+                emotion_score = emotion_result.get("score", 0.0)
 
-                if vader_compound <= -0.5 or bert_label == "NEGATIVE":
-                    mood_label = "Sad 😔"
-                elif vader_compound >= 0.5 or bert_label == "POSITIVE":
-                    mood_label = "Happy 😊"
-                elif any(keyword in user_message.lower() for keyword in ["tired", "exhausted", "sleepy"]):
-                    mood_label = "Tired 😴"
-                elif any(keyword in user_message.lower() for keyword in ["angry", "mad", "frustrated"]):
-                    mood_label = "Angry 😡"
-                elif any(keyword in user_message.lower() for keyword in ["stressed", "anxious", "nervous"]):
+                print(f"VADER compound: {vader_compound}, Emotion label: {emotion_label}, Emotion score: {emotion_score}")
+
+                if emotion_label == "joy":
+                    if vader_compound >= 0.5 and emotion_score > 0.9:
+                        mood_label = "Excited 🎉"
+                    else:
+                        mood_label = "Happy 😊"
+                elif emotion_label == "sadness":
+                    if vader_compound < -0.5:
+                        mood_label = "Sad 😔"
+                    elif -0.5 <= vader_compound <= -0.1 and emotion_score <= 0.7:
+                        mood_label = "Tired 😴"
+                    else:
+                        mood_label = "Sad 😔"
+                elif emotion_label == "anger":
+                    if vader_compound <= -0.5 and emotion_score > 0.9:
+                        mood_label = "Angry 😡"
+                    else:
+                        mood_label = "Stressed 😟"
+                elif emotion_label == "fear":
                     mood_label = "Stressed 😟"
-                elif any(keyword in user_message.lower() for keyword in ["excited", "thrilled", "joyful"]):
-                    mood_label = "Excited 🎉"
+                elif emotion_label == "disgust":
+                    if vader_compound <= -0.5:
+                        mood_label = "Angry 😡"
+                    else:
+                        mood_label = "Stressed 😟"
+                elif emotion_label == "surprise":
+                    if vader_compound >= 0.3:
+                        mood_label = "Excited 🎉"
+                    else:
+                        mood_label = "Neutral 🙂"
+                else:
+                    if -0.1 < vader_compound < 0.3:
+                        mood_label = "Neutral 🙂"
+                    elif vader_compound <= -0.1:
+                        if -0.5 <= vader_compound <= -0.1 and emotion_score <= 0.7:
+                            mood_label = "Tired 😴"
+                        else:
+                            mood_label = "Sad 😔"
+                    else:
+                        mood_label = "Happy 😊"
+
             except Exception as e:
-                print(f"🔥 Error in sentiment analysis: {str(e)}")
+                print(f"🔥 Error in sentiment/emotion analysis: {str(e)}")
                 mood_label = "Neutral 🙂"
         else:
             mood_label = "Neutral 🙂"
 
         print(f"Detected emotion: {mood_label}")
 
-        # Step 3: Generate supportive response with Gemini
+        # Step 2.5: Trigger emergency alert if mood is significantly negative
+        negative_moods = ["Sad 😔", "Angry 😡", "Stressed 😟"]
+        if mood_label in negative_moods:
+            print(f"⚠️ Triggering emergency alert for mood: {mood_label}")
+            send_emergency_alert(user_id, session_id, mood_label, user_message)
+
         history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in conversation_history]) if conversation_history else "No previous conversation."
-        sentiment_info = f"Sentiment (VADER): {vader_result.get('compound', 0.0)}, (BERT): {bert_result.get('label', 'NEUTRAL')} (Confidence: {bert_result.get('score', 0.0)})"
+        sentiment_info = f"Sentiment (VADER): {vader_result.get('compound', 0.0)}, Emotion: {emotion_result.get('label', 'neutral')} (Confidence: {emotion_result.get('score', 0.0)}), Detected Mood: {mood_label}"
         
         prompt = f"""
         {MENTAL_HEALTH_PROMPT}
@@ -729,19 +1091,13 @@ def analyze_message():
         {sentiment_info}\n
 
         Craft a **highly personalized, empathetic, and supportive** response that:
-        - Focuses on the detected emotion (based on the sentiment analysis) and validates the user's feelings in a natural, meaningful way.
+        - Reflects a psychologist-like tone, blending counseling (validate emotions through reflective listening), motivational (inspire resilience and small steps forward), and calming (use soothing, grounding language) approaches based on the detected mood ({mood_label}).
         - **Do not repeat the user's exact message or specific details they shared** (e.g., if they said "I failed a test," do not mention "failed a test" in the response).
-        - Provides comfort, encouragement, or celebration tailored to the emotion (e.g., for Sad, offer deep empathy; for Happy, celebrate their joy; for Angry, validate and suggest calming steps).
-        - If the emotion indicates distress (e.g., Sad, Angry, Stressed), gently suggest a simple, actionable self-help strategy to manage their feelings (e.g., taking a few deep breaths, writing down thoughts, or focusing on a comforting activity).
-        - Avoid generic phrases like 'I'm here for you' unless they fit naturally; focus on specific, creative language that feels personal.
+        - For distress emotions (e.g., Sad, Angry, Stressed, Tired), validate their feelings, offer a calming suggestion (e.g., deep breathing, grounding), and motivate them with a small, achievable step.
+        - For positive emotions (e.g., Happy, Excited), celebrate their joy, encourage them to savor the moment, and motivate them to build on this positivity.
+        - For neutral emotions, gently explore their thoughts with a reflective question and offer a calming suggestion to maintain balance.
+        - Use warm, creative language that feels personal and avoids generic phrases unless they fit naturally.
         - Keep the response concise (2-3 sentences).
-
-        Examples:
-        - Failed Transcription: "I’m sorry, I couldn’t understand your voice message this time. Could you try speaking again or typing how you’re feeling, so I can support you better?"
-        - Sad: "I can feel how heavy your heart is right now, and I’m so sorry you’re going through this. Maybe taking a moment to breathe deeply or writing down your thoughts could help ease that weight—would you like to try?"
-        - Happy: "Your joy is truly shining through, and it’s so wonderful to feel that warmth from you! What’s bringing this brightness into your day?"
-        - Angry: "I can sense how much frustration you’re holding, and it’s completely okay to feel this way. How about taking a few slow breaths to help release some of that tension—want to try it together?"
-        - Neutral: "You seem to be in a calm space with your thoughts today, which is a gentle place to be. Is there anything on your mind you’d like to explore further?"
         """
 
         try:
@@ -754,7 +1110,6 @@ def analyze_message():
             bot_response = "I’m sorry, I couldn’t generate a response due to a technical issue with my language model. Could you try again or type your message instead?"
             mood_label = "Neutral 🙂"
 
-        # Step 4: Fetch self-help resources
         try:
             cursor.execute("SELECT title, link FROM self_help_resources WHERE mood_label = %s", (mood_label,))
             resources = cursor.fetchall()
@@ -763,32 +1118,29 @@ def analyze_message():
             print(f"🔥 Error fetching self-help resources: {str(e)}")
             self_help = [{"title": "No resources available at the moment.", "link": "#"}]
 
-        # Step 5: Store chat data
         try:
             cursor.execute("""
                 INSERT INTO chat (user_id, session_id, message, response, vader_score, bert_label, bert_score, timestamp)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
             """, (user_id, session_id, user_message, bot_response, 
                   vader_result.get('compound', 0.0), 
-                  bert_result.get('label', 'NEUTRAL'), 
-                  bert_result.get('score', 0.0)))
+                  emotion_result.get('label', 'neutral'), 
+                  emotion_result.get('score', 0.0)))
         except Exception as e:
             print(f"🔥 Error storing chat data: {str(e)}")
             bot_response = "I’m sorry, I couldn’t save our chat due to a database issue. Let’s try again—what’s on your mind?"
             mood_label = "Neutral 🙂"
 
-        # Step 6: Store mood data
         try:
             cursor.execute("""
                 INSERT INTO mood (user_id, session_id, message, vader_score, bert_label, bert_score, mood_label, timestamp)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
             """, (user_id, session_id, user_message, 
                   vader_result.get('compound', 0.0), 
-                  bert_result.get('label', 'NEUTRAL'), 
-                  bert_result.get('score', 0.0), mood_label))
+                  emotion_result.get('label', 'neutral'), 
+                  emotion_result.get('score', 0.0), mood_label))
         except Exception as e:
             print(f"🔥 Error storing mood data: {str(e)}")
-            # Continue even if mood storage fails, as it's not critical for the response
 
         db.commit()
         cursor.close()
@@ -876,11 +1228,9 @@ def get_self_help():
         db = get_db_connection()
         cursor = db.cursor()
 
-        # Check if a specific mood_label is provided in the query parameters
         mood_label = request.args.get('mood_label', None)
         
         if not mood_label:
-            # If no mood_label is provided, fetch the latest mood for the user
             cursor.execute(
                 "SELECT mood_label FROM mood WHERE user_id = %s ORDER BY timestamp DESC LIMIT 1",
                 (user_id,)
@@ -891,13 +1241,11 @@ def get_self_help():
         else:
             print(f"Fetching resources for specified mood: {mood_label}")
 
-        # Validate the mood_label against allowed values (optional, but good practice)
         allowed_moods = ["Happy 😊", "Sad 😔", "Angry 😡", "Stressed 😟", "Tired 😴", "Excited 🎉", "Neutral 🙂"]
         if mood_label not in allowed_moods:
             print(f"Invalid mood_label provided: {mood_label}, defaulting to Neutral")
             mood_label = "Neutral 🙂"
 
-        # Fetch self-help resources for the mood
         cursor.execute(
             "SELECT title, link FROM self_help_resources WHERE mood_label = %s",
             (mood_label,)
@@ -905,7 +1253,6 @@ def get_self_help():
         resources = cursor.fetchall()
         self_help = [{"title": res[0], "link": res[1]} for res in resources]
 
-        # If no resources are found for the specific mood, fall back to Neutral resources
         if not self_help:
             print(f"No resources found for mood {mood_label}, falling back to Neutral resources")
             cursor.execute(
@@ -915,7 +1262,6 @@ def get_self_help():
             resources = cursor.fetchall()
             self_help = [{"title": res[0], "link": res[1]} for res in resources]
 
-        # If still no resources, provide a default message
         if not self_help:
             print("No Neutral resources found, returning default message")
             self_help = [{"title": "No resources available at the moment.", "link": "#"}]
