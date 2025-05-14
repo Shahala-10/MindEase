@@ -37,8 +37,26 @@ genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
 # Updated System Prompt for Psychologist-Like Responses
 MENTAL_HEALTH_PROMPT = """
-You are MindEase, a compassionate mental health support companion designed to respond like a skilled psychologist. Your goal is to provide empathetic, supportive, and highly personalized responses that promote emotional well-being through counseling, motivational, and calming tones. Always be warm, understanding, and non-judgmental, using reflective listening to validate the user's emotions, motivational language to inspire resilience and small steps forward, and calming language to soothe and ground them. Do not diagnose conditions or provide medical advice. Keep responses concise (2-3 sentences) and deeply relevant to the user's detected mood and message.
+You are MindEase, a compassionate mental health support companion designed to respond like a skilled psychologist. Your goal is to provide empathetic, supportive, and highly personalized responses that promote emotional well-being through counseling, motivational, and calming tones. Always be warm, understanding, and non-judgmental, using reflective listening to validate the user's emotions, motivational language to inspire resilience and small steps forward, and calming language to soothe and ground them. Respond in the user's preferred language (English or Malayalam) as specified. Do not diagnose conditions or provide medical advice. Keep responses concise (2-3 sentences) and deeply relevant to the user's detected mood and message.
 """
+
+# Define distress keywords for triggering alerts, including new phrases
+DISTRESS_KEYWORDS = [
+    # Existing keywords
+    "help", "crisis", "emergency", "urgent", "danger", "hurt", "scared", 
+    "panic", "desperate", "suicide", "harm", "alone", "trapped", "overwhelmed",
+    # New keywords for severe emotional distress
+    "i want to die", "i don’t want to live anymore", "i’m done with life", 
+    "i can’t go on", "i want to give up", "i’m thinking of killing myself", 
+    "i’m going to end it all", "i don’t see a way out", "i’m planning to end my life",
+    "there’s no point anymore", "i feel completely broken", "i’ve lost all hope", 
+    "nothing matters anymore", "i’m a burden to everyone", "i can’t take it anymore", 
+    "i feel empty inside", "i’m at my breaking point", "i’m drowning in my thoughts",
+    "i have no one left", "i’m all alone in this", "no one cares about me", 
+    "i’m better off gone", "i just want to disappear", "i feel invisible", 
+    "i’m shutting everyone out", "i want to hurt myself", "i’ve been thinking about cutting",
+    "i deserve to feel pain", "i need to make this pain stop", "i’ve been thinking about overdosing"
+]
 
 # Custom JWT error handlers for debugging
 @jwt.invalid_token_loader
@@ -99,6 +117,11 @@ emotion_pipeline = pipeline("text-classification", model="bhadresh-savani/distil
 def save_audio(audio_samples, temp_file="temp_audio.wav"):
     try:
         print("Saving audio file...")
+        # Ensure audio_samples is a NumPy array
+        audio_samples = np.array(audio_samples, dtype=np.float32)
+        # Normalize audio samples to prevent clipping
+        if np.max(np.abs(audio_samples)) > 0:
+            audio_samples = audio_samples / np.max(np.abs(audio_samples))
         sf.write(temp_file, audio_samples, 16000)
         print(f"Audio saved to {temp_file}")
         return temp_file
@@ -106,19 +129,19 @@ def save_audio(audio_samples, temp_file="temp_audio.wav"):
         print(f"Error in save_audio: {str(e)}")
         return None
 
-def transcribe_audio_to_text(audio_file_path, max_attempts=2):
+def transcribe_audio_to_text(audio_file_path, language='en-US', max_attempts=2):
     try:
         if not audio_file_path or not os.path.exists(audio_file_path):
             raise FileNotFoundError("Audio file not found for transcription")
         
-        print("Transcribing audio to text...")
+        print(f"Transcribing audio to text in language: {language}...")
         recognizer = sr.Recognizer()
         attempt = 1
         while attempt <= max_attempts:
             try:
                 with sr.AudioFile(audio_file_path) as source:
                     audio_data = recognizer.record(source, duration=10)
-                    text = recognizer.recognize_google(audio_data, language='en-US')
+                    text = recognizer.recognize_google(audio_data, language=language)
                     print(f"Transcribed text: {text}")
                     return text
             except sr.UnknownValueError:
@@ -134,7 +157,7 @@ def transcribe_audio_to_text(audio_file_path, max_attempts=2):
         return "[Transcription failed]"
 
 # Function to Send Emergency Alerts to Contacts
-def send_emergency_alert(user_id, session_id, mood_label, user_message):
+def send_emergency_alert(user_id, session_id, alert_type, user_message):
     try:
         db = get_db_connection()
         cursor = db.cursor(dictionary=True)
@@ -155,7 +178,7 @@ def send_emergency_alert(user_id, session_id, mood_label, user_message):
         user_name = user["full_name"]
 
         # Insert alert into emergency_alert table
-        alert_message = f"{user_name} is feeling {mood_label} and may need your support. Their message: {user_message}"
+        alert_message = f"{user_name} has sent a distress signal and may need your support. Their message: {user_message}"
         cursor.execute(
             "INSERT INTO emergency_alert (user_id, session_id, message, status) VALUES (%s, %s, %s, 'triggered')",
             (user_id, session_id, alert_message)
@@ -167,7 +190,7 @@ def send_emergency_alert(user_id, session_id, mood_label, user_message):
             if contact["email"]:
                 msg = MIMEText(
                     f"Dear {contact['contact_name']},\n\n"
-                    f"We wanted to let you know that {user_name} is currently feeling {mood_label} and might need your support. "
+                    f"We wanted to let you know that {user_name} has sent a distress signal and might need your support. "
                     f"They shared: '{user_message}'.\n\n"
                     f"Please reach out to them when you can.\n\n"
                     f"Thank you,\nMindEase Team"
@@ -617,10 +640,10 @@ def add_emergency_contact():
         data = request.json
         contact_name = data.get("contact_name", "").strip()
         phone_number = data.get("phone_number", "").strip()
-        email = data.get("email", "").strip() or None  # Optional field
+        email = data.get("email", "").strip()
         relationship = data.get("relationship", "").strip()
 
-        # Validate required fields (mirrors CHECK constraints)
+        # Validate required fields
         if not contact_name:
             return jsonify({"status": "error", "message": "Contact name cannot be empty"}), 400
         if len(contact_name) > 100:
@@ -629,12 +652,14 @@ def add_emergency_contact():
         if not phone_number or not re.match(r"^[0-9]{10,15}$", phone_number):
             return jsonify({"status": "error", "message": "Phone number must be 10-15 digits"}), 400
 
-        if email and not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
+        if not email:
+            return jsonify({"status": "error", "message": "Email is required"}), 400
+        if not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
             return jsonify({"status": "error", "message": "Invalid email format"}), 400
 
-        allowed_relationships = ['Family', 'Friend', 'Caregiver', 'Other']
+        allowed_relationships = ['Family', 'Friend', 'Guardian', 'Other']
         if not relationship or relationship not in allowed_relationships:
-            return jsonify({"status": "error", "message": "Relationship must be one of: Family, Friend, Caregiver, Other"}), 400
+            return jsonify({"status": "error", "message": "Relationship must be one of: Family, Friend, Guardian, Other"}), 400
 
         # Check maximum contacts limit (e.g., 5)
         cursor.execute("SELECT COUNT(*) FROM emergency_contact WHERE user_id = %s", (user_id,))
@@ -738,7 +763,7 @@ def update_emergency_contact(contact_id):
         data = request.json
         contact_name = data.get("contact_name", "").strip()
         phone_number = data.get("phone_number", "").strip()
-        email = data.get("email", "").strip() or None
+        email = data.get("email", "").strip()
         relationship = data.get("relationship", "").strip()
 
         # Validate required fields
@@ -750,12 +775,14 @@ def update_emergency_contact(contact_id):
         if not phone_number or not re.match(r"^[0-9]{10,15}$", phone_number):
             return jsonify({"status": "error", "message": "Phone number must be 10-15 digits"}), 400
 
-        if email and not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
+        if not email:
+            return jsonify({"status": "error", "message": "Email is required"}), 400
+        if not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
             return jsonify({"status": "error", "message": "Invalid email format"}), 400
 
-        allowed_relationships = ['Family', 'Friend', 'Caregiver', 'Other']
+        allowed_relationships = ['Family', 'Friend', 'Guardian', 'Other']
         if not relationship or relationship not in allowed_relationships:
-            return jsonify({"status": "error", "message": "Relationship must be one of: Family, Friend, Caregiver, Other"}), 400
+            return jsonify({"status": "error", "message": "Relationship must be one of: Family, Friend, Guardian, Other"}), 400
 
         # Update the emergency contact
         query = """
@@ -878,7 +905,7 @@ def get_emergency_alerts():
         print("🔥 ERROR in get_emergency_alerts:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# Updated Analyze Endpoint with Emergency Alerts
+# Updated Analyze Endpoint with Language Support
 @app.route('/analyze', methods=['POST'])
 @jwt_required()
 def analyze_message():
@@ -892,6 +919,7 @@ def analyze_message():
         session_id = None
         user_message = ""
         conversation_history = []
+        language = 'en-US'  # Default language
         audio_blob = request.files.get('audio')
 
         if audio_blob:
@@ -899,12 +927,14 @@ def analyze_message():
             data = request.form
             session_id = data.get("session_id")
             conversation_history = json.loads(data.get("conversation_history", "[]"))
+            language = data.get("language", "en-US")  # Get language from frontend
         else:
             print("Text input detected")
             data = request.json or {}
             session_id = data.get("session_id")
             user_message = data.get("message", "").strip()
             conversation_history = data.get("conversation_history", [])
+            language = data.get("language", "en-US")  # Get language from frontend
 
         if not session_id:
             print("🔥 Error: Session ID is required")
@@ -917,13 +947,14 @@ def analyze_message():
         cursor.execute("SELECT user_id FROM session WHERE id = %s", (session_id,))
         session = cursor.fetchone()
         if not session or session[0] != user_id:
-            print("�fire Error: Unauthorized or session not found")
+            print("🔥 Error: Unauthorized or session not found")
             return jsonify({"status": "error", "message": "Unauthorized or session not found"}), 403
 
         mood_label = "Neutral 🙂"
         bot_response = ""
         vader_result = {'compound': 0.0}
         emotion_result = {'label': 'neutral', 'score': 0.0}
+        trigger_alert = False
 
         if audio_blob:
             audio_data = BytesIO(audio_blob.read())
@@ -990,7 +1021,7 @@ def analyze_message():
                 }), 200
 
             try:
-                transcription = transcribe_audio_to_text(temp_file, max_attempts=2)
+                transcription = transcribe_audio_to_text(temp_file, language=language, max_attempts=2)
                 user_message = transcription if "[Transcription" not in transcription else "[Voice input: Unable to transcribe]"
                 print(f"Final user message: {user_message}")
                 if "[Transcription" in transcription:
@@ -1016,6 +1047,16 @@ def analyze_message():
                 os.remove(temp_file)
                 print("Temporary audio file removed")
 
+        # Check for distress keywords and phrases in the user message
+        if "[Transcription" not in user_message and "[Voice input" not in user_message:
+            message_lower = user_message.lower()
+            for keyword in DISTRESS_KEYWORDS:
+                if keyword in message_lower:
+                    trigger_alert = True
+                    print(f"⚠️ Distress keyword/phrase detected: '{keyword}'")
+                    break
+
+        # Perform sentiment and emotion analysis
         if "[Transcription" not in user_message and "[Voice input" not in user_message:
             try:
                 vader_result = analyzer.polarity_scores(user_message)
@@ -1026,6 +1067,13 @@ def analyze_message():
 
                 print(f"VADER compound: {vader_compound}, Emotion label: {emotion_label}, Emotion score: {emotion_score}")
 
+                # Check for severe distress based on sentiment and emotion thresholds
+                if not trigger_alert:  # Only check if keywords didn't already trigger
+                    if vader_compound < -0.8 and emotion_label in ["sadness", "fear"] and emotion_score > 0.9:
+                        trigger_alert = True
+                        print("⚠️ Severe emotional distress detected based on sentiment and emotion scores")
+
+                # Updated mood classification logic with confidence threshold
                 if emotion_label == "joy":
                     if vader_compound >= 0.5 and emotion_score > 0.9:
                         mood_label = "Excited 🎉"
@@ -1043,26 +1091,25 @@ def analyze_message():
                         mood_label = "Angry 😡"
                     else:
                         mood_label = "Stressed 😟"
-                elif emotion_label == "fear":
-                    mood_label = "Stressed 😟"
-                elif emotion_label == "disgust":
-                    if vader_compound <= -0.5:
-                        mood_label = "Angry 😡"
-                    else:
+                elif emotion_label == "fear" or emotion_label == "disgust":
+                    # Only assign "Stressed 😟" if BERT confidence is high
+                    if emotion_score > 0.8:
                         mood_label = "Stressed 😟"
-                elif emotion_label == "surprise":
-                    if vader_compound >= 0.3:
-                        mood_label = "Excited 🎉"
                     else:
-                        mood_label = "Neutral 🙂"
+                        # Fallback to VADER-based logic if BERT confidence is low
+                        if -0.1 < vader_compound < 0.3:
+                            mood_label = "Neutral 🙂"
+                        elif vader_compound <= -0.1:
+                            mood_label = "Tired 😴" if -0.5 <= vader_compound <= -0.1 and emotion_score <= 0.7 else "Sad 😔"
+                        else:
+                            mood_label = "Happy 😊"
+                elif emotion_label == "surprise":
+                    mood_label = "Excited 🎉" if vader_compound >= 0.3 else "Neutral 🙂"
                 else:
                     if -0.1 < vader_compound < 0.3:
                         mood_label = "Neutral 🙂"
                     elif vader_compound <= -0.1:
-                        if -0.5 <= vader_compound <= -0.1 and emotion_score <= 0.7:
-                            mood_label = "Tired 😴"
-                        else:
-                            mood_label = "Sad 😔"
+                        mood_label = "Tired 😴" if -0.5 <= vader_compound <= -0.1 and emotion_score <= 0.7 else "Sad 😔"
                     else:
                         mood_label = "Happy 😊"
 
@@ -1074,12 +1121,12 @@ def analyze_message():
 
         print(f"Detected emotion: {mood_label}")
 
-        # Step 2.5: Trigger emergency alert if mood is significantly negative
-        negative_moods = ["Sad 😔", "Angry 😡", "Stressed 😟"]
-        if mood_label in negative_moods:
-            print(f"⚠️ Triggering emergency alert for mood: {mood_label}")
-            send_emergency_alert(user_id, session_id, mood_label, user_message)
+        # Trigger emergency alert if distress keywords or severe sentiment are detected
+        if trigger_alert:
+            print(f"⚠️ Triggering emergency alert due to distress detection in message: {user_message}")
+            send_emergency_alert(user_id, session_id, "Distress", user_message)
 
+        # Generate bot response
         history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in conversation_history]) if conversation_history else "No previous conversation."
         sentiment_info = f"Sentiment (VADER): {vader_result.get('compound', 0.0)}, Emotion: {emotion_result.get('label', 'neutral')} (Confidence: {emotion_result.get('score', 0.0)}), Detected Mood: {mood_label}"
         
@@ -1089,14 +1136,14 @@ def analyze_message():
         Conversation history:\n{history_text}\n
         Current user message: "{user_message}"\n
         {sentiment_info}\n
+        Distress keywords detected: {trigger_alert}\n
+        User language preference: {language} (respond in {'Malayalam' if language == 'ml-IN' else 'English'})\n
 
         Craft a **highly personalized, empathetic, and supportive** response that:
-        - Reflects a psychologist-like tone, blending counseling (validate emotions through reflective listening), motivational (inspire resilience and small steps forward), and calming (use soothing, grounding language) approaches based on the detected mood ({mood_label}).
-        - **Do not repeat the user's exact message or specific details they shared** (e.g., if they said "I failed a test," do not mention "failed a test" in the response).
-        - For distress emotions (e.g., Sad, Angry, Stressed, Tired), validate their feelings, offer a calming suggestion (e.g., deep breathing, grounding), and motivate them with a small, achievable step.
-        - For positive emotions (e.g., Happy, Excited), celebrate their joy, encourage them to savor the moment, and motivate them to build on this positivity.
-        - For neutral emotions, gently explore their thoughts with a reflective question and offer a calming suggestion to maintain balance.
-        - Use warm, creative language that feels personal and avoids generic phrases unless they fit naturally.
+        - Reflects a psychologist-like tone, blending counseling, motivational, and calming approaches based on the detected mood ({mood_label}) and distress signals.
+        - If distress keywords were detected, acknowledge the urgency gently (e.g., "It sounds like you’re going through something really tough right now") and suggest immediate support options (e.g., reaching out to a trusted contact).
+        - Respond in the user's preferred language ({'Malayalam' if language == 'ml-IN' else 'English'}).
+        - Do not repeat the user's exact message or specific details.
         - Keep the response concise (2-3 sentences).
         """
 
@@ -1107,9 +1154,10 @@ def analyze_message():
             print(f"Gemini response: {bot_response}")
         except Exception as gemini_error:
             print(f"🔥 Gemini Error: {str(gemini_error)}")
-            bot_response = "I’m sorry, I couldn’t generate a response due to a technical issue with my language model. Could you try again or type your message instead?"
+            bot_response = "I’m sorry, I couldn’t generate a response due to a technical issue. Could you try again or type your message instead?" if language == 'en-US' else "ക്ഷമിക്കണം, സാങ്കേതിക പ്രശ്നം കാരണം എനിക്ക് പ്രതികരിക്കാൻ കഴിഞ്ഞില്ല. വീണ്ടും ശ്രമിക്കാമോ അല്ലെങ്കിൽ നിന്റെ സന്ദേശം ടൈപ്പ് ചെയ്യാമോ?"
             mood_label = "Neutral 🙂"
 
+        # Fetch self-help resources
         try:
             cursor.execute("SELECT title, link FROM self_help_resources WHERE mood_label = %s", (mood_label,))
             resources = cursor.fetchall()
@@ -1118,6 +1166,7 @@ def analyze_message():
             print(f"🔥 Error fetching self-help resources: {str(e)}")
             self_help = [{"title": "No resources available at the moment.", "link": "#"}]
 
+        # Store chat data
         try:
             cursor.execute("""
                 INSERT INTO chat (user_id, session_id, message, response, vader_score, bert_label, bert_score, timestamp)
@@ -1128,9 +1177,10 @@ def analyze_message():
                   emotion_result.get('score', 0.0)))
         except Exception as e:
             print(f"🔥 Error storing chat data: {str(e)}")
-            bot_response = "I’m sorry, I couldn’t save our chat due to a database issue. Let’s try again—what’s on your mind?"
+            bot_response = "I’m sorry, I couldn’t save our chat due to a database issue. Let’s try again—what’s on your mind?" if language == 'en-US' else "ക്ഷമിക്കണം, ഡാറ്റാബേസ് പ്രശ്നം കാരണം ഞങ്ങളുടെ ചാറ്റ് സേവ് ചെയ്യാൻ കഴിഞ്ഞില്ല. വീണ്ടും ശ്രമിക്കാം—നിന്റെ മനസ്സിൽ എന്താണ്?"
             mood_label = "Neutral 🙂"
 
+        # Store mood data
         try:
             cursor.execute("""
                 INSERT INTO mood (user_id, session_id, message, vader_score, bert_label, bert_score, mood_label, timestamp)
@@ -1155,7 +1205,8 @@ def analyze_message():
                 "response": bot_response,
                 "mood_label": mood_label,
                 "self_help": self_help,
-                "mood_tracked": True
+                "mood_tracked": True,
+                "alert_triggered": trigger_alert
             }
         })
 
@@ -1170,10 +1221,11 @@ def analyze_message():
                 "chat_id": 0,
                 "message": "Voice message sent 🎙️" if 'audio_blob' in locals() and audio_blob else user_message if 'user_message' in locals() else "[Voice input: Unable to process]",
                 "transcribed_text": user_message if 'user_message' in locals() and "[Transcription" not in user_message and "[Voice input" not in user_message else None,
-                "response": "I’m sorry, something went wrong while processing your message. I’m still here for you—let’s try again. What’s on your mind?",
+                "response": "I’m sorry, something went wrong while processing your message. I’m still here for you—let’s try again. What’s on your mind?" if language == 'en-US' else "ക്ഷമിക്കണം, നിന്റെ സന്ദേശം പ്രോസസ്സ് ചെയ്യുന്നതിനിടയിൽ എന്തോ കുഴപ്പം സംഭവിച്ചു. ഞാൻ ഇപ്പോഴും ഇവിടെ ഉണ്ട്—വീണ്ടും ശ്രമിക്കാം. നിന്റെ മനസ്സിൽ എന്താണ്?",
                 "mood_label": "Neutral 🙂",
                 "self_help": [{"title": "No resources available at the moment.", "link": "#"}],
-                "mood_tracked": False
+                "mood_tracked": False,
+                "alert_triggered": False
             }
         }), 200
 
@@ -1215,6 +1267,77 @@ def get_chats(session_id):
 
     except Exception as e:
         print("🔥 ERROR in get_chats:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# API to Fetch All Chat History for a User (Across All Sessions)
+@app.route('/get_user_chat_history', methods=['GET'])
+@jwt_required()
+def get_user_chat_history():
+    print("📜 Get-user-chat-history endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        # Step 1: Fetch all session IDs for the user
+        cursor.execute("SELECT id FROM session WHERE user_id = %s ORDER BY start_time DESC", (user_id,))
+        sessions = cursor.fetchall()
+        if not sessions:
+            cursor.close()
+            db.close()
+            return jsonify({
+                "status": "success",
+                "data": {
+                    "chat_history": [],
+                    "message": "No sessions found for this user"
+                }
+            }), 200
+
+        session_ids = [session['id'] for session in sessions]
+
+        # Step 2: Dynamically create placeholders for the IN clause
+        placeholders = ','.join(['%s'] * len(session_ids))  # Creates '%s,%s,%s,...' based on the number of session IDs
+        query = f"""
+            SELECT c.id, c.session_id, c.message, c.response, c.timestamp, s.start_time
+            FROM chat c
+            JOIN session s ON c.session_id = s.id
+            WHERE c.session_id IN ({placeholders})
+            ORDER BY c.timestamp DESC
+        """
+        cursor.execute(query, session_ids)  # Pass the session_ids list directly
+
+        chats = cursor.fetchall()
+
+        # Step 3: Structure the chat history
+        chat_history = [
+            {
+                "chat_id": chat["id"],
+                "session_id": chat["session_id"],
+                "session_start_time": str(chat["start_time"]),
+                "message": chat["message"],
+                "response": chat["response"],
+                "timestamp": str(chat["timestamp"])
+            }
+            for chat in chats
+        ]
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "chat_history": chat_history,
+                "message": f"Retrieved {len(chat_history)} chat entries for user {user_id}"
+            }
+        }), 200
+
+    except Exception as e:
+        print("🔥 ERROR in get_user_chat_history:", str(e))
+        if 'db' in locals():
+            cursor.close()
+            db.close()
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # API to Fetch Self-Help Resources Based on Latest Mood or Specific Mood
@@ -1261,10 +1384,10 @@ def get_self_help():
             )
             resources = cursor.fetchall()
             self_help = [{"title": res[0], "link": res[1]} for res in resources]
-
-        if not self_help:
-            print("No Neutral resources found, returning default message")
-            self_help = [{"title": "No resources available at the moment.", "link": "#"}]
+            
+            if not self_help:
+                print("No Neutral resources found, returning default message")
+                self_help = [{"title": "No resources available at the moment.", "link": "#"}]
 
         print(f"Returning {len(self_help)} resources for mood {mood_label}")
         cursor.close()
@@ -1284,7 +1407,7 @@ def get_self_help():
             "status": "error",
             "message": str(e)
         }), 500
-        
+
 # API to Fetch Mood History by User
 @app.route('/get_mood_history', methods=['GET'])
 @jwt_required()
@@ -1296,7 +1419,12 @@ def get_mood_history():
         db = get_db_connection()
         cursor = db.cursor()
 
-        query = "SELECT id, message, vader_score, bert_label, bert_score, timestamp FROM mood WHERE user_id = %s ORDER BY timestamp DESC"
+        query = """
+            SELECT id, message, vader_score, bert_label, bert_score, mood_label, timestamp 
+            FROM mood 
+            WHERE user_id = %s 
+            ORDER BY timestamp DESC
+        """
         cursor.execute(query, (user_id,))
         mood_history = cursor.fetchall()
 
@@ -1307,7 +1435,8 @@ def get_mood_history():
                 "vader_score": float(mood[2]) if mood[2] is not None else None,
                 "bert_label": mood[3] if mood[3] else None,
                 "bert_score": float(mood[4]) if mood[4] is not None else None,
-                "timestamp": str(mood[5])
+                "mood_label": mood[5],
+                "timestamp": str(mood[6])
             }
             for mood in mood_history
         ]
