@@ -1450,5 +1450,228 @@ def get_mood_history():
         print("🔥 ERROR in get_mood_history:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+# API to Save Quiz Result
+@app.route('/save_quiz_result', methods=['POST'])
+@jwt_required()
+def save_quiz_result():
+    print("📝 Save-quiz-result endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        data = request.json
+        quiz_title = data.get("quizTitle", "").strip()
+        score = data.get("score")
+        total_questions = data.get("totalQuestions")
+        category = data.get("category", "").strip()
+        result_level = data.get("resultLevel", "").strip()
+        elapsed_time = data.get("elapsedTime")  # New field for elapsed time in seconds
+
+        # Validate required fields
+        if not all([quiz_title, score is not None, total_questions is not None, category, result_level]):
+            return jsonify({"status": "error", "message": "Missing required fields"}), 400
+
+        if not isinstance(score, (int, float)) or not isinstance(total_questions, int):
+            return jsonify({"status": "error", "message": "Score must be a number and total questions must be an integer"}), 400
+
+        if score < 0 or total_questions <= 0 or score > total_questions:
+            return jsonify({"status": "error", "message": "Invalid score or total questions"}), 400
+
+        if elapsed_time is None or not isinstance(elapsed_time, (int, float)) or elapsed_time < 0:
+            return jsonify({"status": "error", "message": "Elapsed time must be a non-negative number"}), 400
+
+        # Insert quiz result into the database
+        query = """
+            INSERT INTO quiz_results (user_id, quiz_title, score, total_questions, category, result_level, elapsed_time, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+        """
+        cursor.execute(query, (user_id, quiz_title, score, total_questions, category, result_level, elapsed_time))
+        db.commit()
+
+        quiz_result_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        print(f"✅ Quiz result saved for user_id: {user_id}, quiz_result_id: {quiz_result_id}")
+        return jsonify({
+            "status": "success",
+            "data": {
+                "quiz_result_id": quiz_result_id,
+                "message": "Quiz result saved successfully"
+            }
+        })
+
+    except Exception as e:
+        print("🔥 ERROR in save_quiz_result:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# API to Get Quiz History for a User
+@app.route('/get_quiz_history', methods=['GET'])
+@jwt_required()
+def get_quiz_history():
+    print("📜 Get-quiz-history endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        query = """
+            SELECT id, quiz_title, score, total_questions, category, result_level, elapsed_time, timestamp
+            FROM quiz_results
+            WHERE user_id = %s
+            ORDER BY timestamp DESC
+        """
+        cursor.execute(query, (user_id,))
+        quiz_results = cursor.fetchall()
+
+        quiz_history = [
+            {
+                "id": result["id"],
+                "quiz_title": result["quiz_title"],
+                "score": result["score"],
+                "total_questions": result["total_questions"],
+                "category": result["category"],
+                "result_level": result["result_level"],
+                "elapsed_time": result["elapsed_time"],  # Include elapsed time
+                "timestamp": str(result["timestamp"])
+            }
+            for result in quiz_results
+        ]
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "quiz_history": quiz_history,
+                "message": f"Retrieved {len(quiz_history)} quiz results for user {user_id}"
+            }
+        })
+
+    except Exception as e:
+        print("🔥 ERROR in get_quiz_history:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+        # API to Get Mini-Game Suggestions
+# API to Get Mini-Game Suggestions Based on Mood
+# API to Get Mini-Game Suggestions Based on Mood
+# API to Get Mini-Game Suggestions Based on Mood
+# API to Get Mini-Game Suggestions Based on Mood
+@app.route('/get_mini_games', methods=['GET'])
+@jwt_required()
+def get_mini_games():
+    print("🎮 Get-mini-games endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        # Fetch the user's latest mood
+        cursor.execute(
+            "SELECT mood_label FROM mood WHERE user_id = %s ORDER BY timestamp DESC LIMIT 1",
+            (user_id,)
+        )
+        mood_result = cursor.fetchone()
+        mood_label = mood_result["mood_label"] if mood_result else "Neutral 🙂"
+        print(f"Latest mood for user {user_id}: '{mood_label}' (HEX: {mood_label.encode('utf-8').hex()})")
+
+        # Validate the mood_label
+        allowed_moods = ["Happy 😊", "Sad 😔", "Angry 😡", "Stressed 😟", "Tired 😴", "Excited 🎉", "Neutral 🙂"]
+        if mood_label not in allowed_moods:
+            print(f"Invalid mood_label detected: '{mood_label}', defaulting to Neutral")
+            mood_label = "Neutral 🙂"
+
+        # Normalize mood_label by stripping the emoji for comparison
+        # Extract the base mood (e.g., "Tired" from "Tired 😴")
+        mood_base = mood_label.split()[0]  # Get the first word (e.g., "Tired")
+        print(f"Normalized mood base: {mood_base}")
+
+        # Fetch mini-games based on the normalized mood_label
+        query = """
+            SELECT id, title, description, stress_level, mood_label, game_type 
+            FROM mini_games 
+            WHERE SUBSTRING_INDEX(mood_label, ' ', 1) = %s 
+            LIMIT 3
+        """
+        cursor.execute(query, (mood_base,))
+        games = cursor.fetchall()
+        print(f"Games found for mood '{mood_label}' (base: {mood_base}): {games}")
+
+        if not games:
+            # Fallback to Neutral mood games if none match the user's mood
+            print(f"No games found for mood '{mood_label}', falling back to Neutral games")
+            cursor.execute(
+                "SELECT id, title, description, stress_level, mood_label, game_type FROM mini_games WHERE SUBSTRING_INDEX(mood_label, ' ', 1) = 'Neutral' LIMIT 3"
+            )
+            games = cursor.fetchall()
+            print(f"Fallback games for Neutral 🙂: {games}")
+
+        if not games:
+            print("No Neutral games found, returning empty list")
+            games = []
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "games": games,
+                "mood_label": mood_label
+            }
+        }), 200
+
+    except Exception as e:
+        print("🔥 ERROR in get_mini_games:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+        
+# API to Log Game Interaction
+@app.route('/log_game_interaction', methods=['POST'])
+@jwt_required()
+def log_game_interaction():
+    print("📊 Log-game-interaction endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        data = request.json
+        game_id = data.get("game_id")
+
+        if not game_id:
+            return jsonify({"status": "error", "message": "Game ID is required"}), 400
+
+        # Check if the game exists
+        cursor.execute("SELECT id FROM mini_games WHERE id = %s", (game_id,))
+        if not cursor.fetchone():
+            return jsonify({"status": "error", "message": "Game not found"}), 404
+
+        # Log the interaction
+        cursor.execute(
+            "INSERT INTO user_game_interactions (user_id, game_id) VALUES (%s, %s)",
+            (user_id, game_id)
+        )
+        db.commit()
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "message": "Game interaction logged successfully"
+        }), 200
+
+    except Exception as e:
+        print("🔥 ERROR in log_game_interaction:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
