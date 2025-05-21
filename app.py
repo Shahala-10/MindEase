@@ -30,7 +30,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # JWT Configuration
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
-jwt = JWTManager(app)
+jwtObject = JWTManager(app)
 
 # Gemini API Configuration
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
@@ -59,17 +59,17 @@ DISTRESS_KEYWORDS = [
 ]
 
 # Custom JWT error handlers for debugging
-@jwt.invalid_token_loader
+@jwtObject.invalid_token_loader
 def invalid_token_callback(error):
     print("🔥 JWT Error: Invalid token", str(error))
     return jsonify({"status": "error", "message": "Invalid token", "error": str(error)}), 401
 
-@jwt.expired_token_loader
+@jwtObject.expired_token_loader
 def expired_token_callback(jwt_header, jwt_payload):
     print("🔥 JWT Error: Token has expired", jwt_payload)
     return jsonify({"status": "error", "message": "Token has expired", "error": "The token has expired"}), 401
 
-@jwt.unauthorized_loader
+@jwtObject.unauthorized_loader
 def unauthorized_callback(error):
     print("🔥 JWT Error: Missing Authorization Header", str(error))
     return jsonify({"status": "error", "message": "Missing Authorization Header", "error": str(error)}), 401
@@ -904,8 +904,41 @@ def get_emergency_alerts():
     except Exception as e:
         print("🔥 ERROR in get_emergency_alerts:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
+      # Feedback submission endpoint
+@app.route('/submit_feedback', methods=['POST'])
+def submit_feedback():
+    try:
+        data = request.get_json()
+        print(f"Received feedback data: {data}")  # Log the incoming data for debugging
+        name = data.get('name')
+        email = data.get('email')
+        message = data.get('message')
+        rating = data.get('rating')
 
-# Updated Analyze Endpoint with Language Support
+        # Validate input
+        if not all([name, email, message]) or rating is None:
+            return jsonify({"status": "error", "message": "All fields are required"}), 400
+        
+        if not isinstance(rating, int) or rating < 1 or rating > 5:
+            return jsonify({"status": "error", "message": "Rating must be an integer between 1 and 5"}), 400
+
+        # Insert feedback into the database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO feedback (name, email, message, rating)
+            VALUES (%s, %s, %s, %s)
+        ''', (name, email, message, rating))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({"status": "success", "message": "Feedback submitted successfully"}), 200
+
+    except Exception as e:
+        print(f"Error submitting feedback: {e}")
+        return jsonify({"status": "error", "message": "Failed to submit feedback"}), 500
+        
 @app.route('/analyze', methods=['POST'])
 @jwt_required()
 def analyze_message():
@@ -1073,8 +1106,22 @@ def analyze_message():
                         trigger_alert = True
                         print("⚠️ Severe emotional distress detected based on sentiment and emotion scores")
 
-                # Updated mood classification logic with confidence threshold
-                if emotion_label == "joy":
+                # Updated mood classification logic to prioritize greetings, "tired", "happy", and "excited"
+                message_lower = user_message.lower()
+                greetings = ["hi", "hello", "hey"]
+                if any(greeting in message_lower for greeting in greetings):  # Explicitly check for greetings
+                    mood_label = "Neutral 🙂"
+                    print("Explicitly detected a greeting in message, setting mood to Neutral 🙂")
+                elif "tired" in message_lower:  # Explicitly check for "tired" keyword
+                    mood_label = "Tired 😴"
+                    print("Explicitly detected 'tired' in message, setting mood to Tired 😴")
+                elif "happy" in message_lower:  # Explicitly check for "happy" keyword
+                    mood_label = "Happy 😊"
+                    print("Explicitly detected 'happy' in message, setting mood to Happy 😊")
+                elif "excited" in message_lower:  # Explicitly check for "excited" keyword
+                    mood_label = "Excited 🎉"
+                    print("Explicitly detected 'excited' in message, setting mood to Excited 🎉")
+                elif emotion_label == "joy":
                     if vader_compound >= 0.5 and emotion_score > 0.9:
                         mood_label = "Excited 🎉"
                     else:
@@ -1092,11 +1139,9 @@ def analyze_message():
                     else:
                         mood_label = "Stressed 😟"
                 elif emotion_label == "fear" or emotion_label == "disgust":
-                    # Only assign "Stressed 😟" if BERT confidence is high
                     if emotion_score > 0.8:
                         mood_label = "Stressed 😟"
                     else:
-                        # Fallback to VADER-based logic if BERT confidence is low
                         if -0.1 < vader_compound < 0.3:
                             mood_label = "Neutral 🙂"
                         elif vader_compound <= -0.1:
@@ -1163,7 +1208,7 @@ def analyze_message():
             resources = cursor.fetchall()
             self_help = [{"title": res[0], "link": res[1]} for res in resources] or [{"title": "No resources available at the moment.", "link": "#"}]
         except Exception as e:
-            print(f"🔥 Error fetching self-help resources: {str(e)}")
+            print(f"�fire Error fetching self-help resources: {str(e)}")
             self_help = [{"title": "No resources available at the moment.", "link": "#"}]
 
         # Store chat data
