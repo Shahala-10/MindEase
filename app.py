@@ -30,7 +30,7 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # JWT Configuration
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY')
-jwtObject = JWTManager(app)
+jwtObject= JWTManager(app)
 
 # Gemini API Configuration
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
@@ -1603,10 +1603,7 @@ def get_quiz_history():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-        # API to Get Mini-Game Suggestions
-# API to Get Mini-Game Suggestions Based on Mood
-# API to Get Mini-Game Suggestions Based on Mood
-# API to Get Mini-Game Suggestions Based on Mood
+
 # API to Get Mini-Game Suggestions Based on Mood
 @app.route('/get_mini_games', methods=['GET'])
 @jwt_required()
@@ -1717,6 +1714,302 @@ def log_game_interaction():
     except Exception as e:
         print("🔥 ERROR in log_game_interaction:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
+
+def is_admin_user(user_id):
+    try:
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("SELECT id FROM admins WHERE id = %s", (user_id,))
+        admin = cursor.fetchone()
+        cursor.close()
+        db.close()
+        return admin is not None
+    except Exception as e:
+        print(f"🔥 Error checking admin status: {str(e)}")
+        return False
+
+# Admin Login Route
+@app.route('/admin/login', methods=['POST'])
+def admin_login():
+    print("🔐 Admin login endpoint called")
+    try:
+        data = request.get_json()
+        email = data.get('email', '').strip()
+        password = data.get('password', '').strip()
+
+        if not email or not password:
+            return jsonify({"status": "error", "message": "Email and password are required"}), 400
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("SELECT id, password FROM admins WHERE email = %s", (email,))
+        admin = cursor.fetchone()
+        cursor.close()
+        db.close()
+
+        if not admin:
+            print("Admin not found")
+            return jsonify({"status": "error", "message": "Invalid credentials"}), 401
+
+        admin_id, stored_password = admin['id'], admin['password']
+        # Compare plaintext passwords directly
+        if password != stored_password:
+            print("Password mismatch")
+            return jsonify({"status": "error", "message": "Invalid credentials"}), 401
+
+        access_token = create_access_token(identity=str(admin_id), expires_delta=timedelta(days=1))
+        print(f"✅ Admin login successful for admin_id: {admin_id}")
+        return jsonify({
+            "status": "success",
+            "data": {
+                "access_token": access_token,
+                "admin_id": admin_id,
+                "message": "Admin login successful"
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_login: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Admin Route to List All Users
+@app.route('/admin/users', methods=['GET'])
+@jwt_required()
+def admin_get_users():
+    print("📋 Admin get-users endpoint called")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("SELECT id, full_name, email, created_at FROM user")
+        users = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        user_list = [
+            {
+                "id": user["id"],
+                "full_name": user["full_name"],
+                "email": user["email"],
+                "created_at": str(user["created_at"])
+            }
+            for user in users
+        ]
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "users": user_list
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_get_users: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Admin Route to Add a New User
+@app.route('/admin/users', methods=['POST'])
+@jwt_required()
+def admin_add_user():
+    print("➕ Admin add-user endpoint called")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        data = request.get_json()
+        full_name = data.get('full_name', '').strip()
+        email = data.get('email', '').strip()
+        password = data.get('password', '').strip()
+
+        if not full_name or not email or not password:
+            return jsonify({"status": "error", "message": "Full name, email, and password are required"}), 400
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        # Check if email already exists
+        cursor.execute("SELECT id FROM user WHERE email = %s", (email,))
+        existing_user = cursor.fetchone()
+        if existing_user:
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "Email already exists"}), 400
+
+        # Insert new user
+        cursor.execute(
+            "INSERT INTO user (full_name, email, password, date_of_birth, gender, phone_number) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (full_name, email, password, '1990-01-01', 'Other', '1234567890')  # Default values for required fields
+        )
+        db.commit()
+        cursor.close()
+        db.close()
+
+        return jsonify({"status": "success", "message": "User added successfully"}), 201
+
+    except Exception as e:
+        print(f"🔥 Error in admin_add_user: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Admin Route to Delete a User
+@app.route('/admin/users/<int:user_id>', methods=['DELETE'])
+@jwt_required()
+def admin_delete_user(user_id):
+    print(f"🗑️ Admin delete-user endpoint called for user_id: {user_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        # Check if user exists
+        cursor.execute("SELECT id FROM user WHERE id = %s", (user_id,))
+        user = cursor.fetchone()
+        if not user:
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        # Delete related records (cascade should handle this if set in DB, but let's be explicit)
+        cursor.execute("DELETE FROM chat WHERE user_id = %s", (user_id,))
+        cursor.execute("DELETE FROM user_activity_logs WHERE user_id = %s", (user_id,))
+        cursor.execute("DELETE FROM mood_trends WHERE user_id = %s", (user_id,))
+        cursor.execute("DELETE FROM user WHERE id = %s", (user_id,))
+        db.commit()
+        cursor.close()
+        db.close()
+
+        return jsonify({"status": "success", "message": "User deleted successfully"}), 200
+
+    except Exception as e:
+        print(f"🔥 Error in admin_delete_user: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Admin Route to View a User's Chats
+@app.route('/admin/chats/<int:user_id>', methods=['GET'])
+@jwt_required()
+def admin_get_chats(user_id):
+    print(f"💬 Admin get-chats endpoint called for user_id: {user_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("SELECT id, session_id, message, response, timestamp FROM chat WHERE user_id = %s ORDER BY timestamp DESC", (user_id,))
+        chats = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        chat_list = [
+            {
+                "chat_id": chat["id"],
+                "session_id": chat["session_id"],
+                "message": chat["message"],
+                "response": chat["response"],
+                "timestamp": str(chat["timestamp"])
+            }
+            for chat in chats
+        ]
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "chats": chat_list
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_get_chats: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Admin Route to View User Activity Analytics
+@app.route('/admin/analytics/activity/<int:user_id>', methods=['GET'])
+@jwt_required()
+def admin_get_user_activity(user_id):
+    print(f"📊 Admin get-user-activity endpoint called for user_id: {user_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT * FROM user_activity_logs WHERE user_id = %s ORDER BY timestamp DESC LIMIT 10",
+            (user_id,)
+        )
+        activities = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        activity_list = [
+            {
+                "id": activity["id"],
+                "user_id": activity["user_id"],
+                "activity_type": activity["activity_type"],
+                "description": activity["description"],
+                "timestamp": str(activity["timestamp"])
+            }
+            for activity in activities
+        ]
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "activities": activity_list
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_get_user_activity: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# Admin Route to View User Mood Trends
+@app.route('/admin/analytics/mood-trends/<int:user_id>', methods=['GET'])
+@jwt_required()
+def admin_get_mood_trends(user_id):
+    print(f"📈 Admin get-mood-trends endpoint called for user_id: {user_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT mood_label, date, occurrence_count FROM mood_trends WHERE user_id = %s ORDER BY date DESC LIMIT 7",
+            (user_id,)
+        )
+        trends = cursor.fetchall()
+        cursor.close()
+        db.close()
+
+        trend_list = [
+            {
+                "mood_label": trend["mood_label"],
+                "date": str(trend["date"]),
+                "occurrence_count": trend["occurrence_count"]
+            }
+            for trend in trends
+        ]
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "mood_trends": trend_list
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_get_mood_trends: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
