@@ -1477,45 +1477,64 @@ def get_mood_history():
         print("🔥 ERROR in get_mood_history:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
 # API to Save Quiz Result
 @app.route('/save_quiz_result', methods=['POST'])
 @jwt_required()
 def save_quiz_result():
     print("📝 Save-quiz-result endpoint called")
     try:
-        user_id = get_jwt_identity()
-        user_id = int(user_id)
+        user_id = int(get_jwt_identity())
         db = get_db_connection()
         cursor = db.cursor()
 
         data = request.json
-        quiz_title = data.get("quizTitle", "").strip()
+        quiz_type = data.get("quizType", "").strip()
         score = data.get("score")
-        total_questions = data.get("totalQuestions")
         category = data.get("category", "").strip()
-        result_level = data.get("resultLevel", "").strip()
-        elapsed_time = data.get("elapsedTime")  # New field for elapsed time in seconds
+        elapsed_time = data.get("elapsedTime")
+
+        # Map quiz_type to quiz_title (e.g., "anxiety" -> "Anxiety Assessment")
+        quiz_title_map = {
+            "anxiety": "Anxiety Assessment",
+            "depression": "Depression Screening",
+            "stress": "Stress Level Check",
+            "mindfulness": "Mindfulness Check",
+            "sleep": "Sleep Quality Assessment"
+        }
+        quiz_title = quiz_title_map.get(quiz_type, quiz_type)
+
+        # Assume total_questions is the number of questions for the quiz type (hardcoded for simplicity)
+        total_questions_map = {
+            "anxiety": 5,
+            "depression": 5,
+            "stress": 5,
+            "mindfulness": 5,
+            "sleep": 5
+        }
+        total_questions = total_questions_map.get(quiz_type, 5)
 
         # Validate required fields
-        if not all([quiz_title, score is not None, total_questions is not None, category, result_level]):
+        if not all([quiz_type, score is not None, category, elapsed_time is not None]):
             return jsonify({"status": "error", "message": "Missing required fields"}), 400
 
         if not isinstance(score, (int, float)) or not isinstance(total_questions, int):
             return jsonify({"status": "error", "message": "Score must be a number and total questions must be an integer"}), 400
 
-        if score < 0 or total_questions <= 0 or score > total_questions:
+        if score < 0 or total_questions <= 0 or score > total_questions * 3:  # Max score per question is 3
             return jsonify({"status": "error", "message": "Invalid score or total questions"}), 400
 
-        if elapsed_time is None or not isinstance(elapsed_time, (int, float)) or elapsed_time < 0:
+        if not isinstance(elapsed_time, (int, float)) or elapsed_time < 0:
             return jsonify({"status": "error", "message": "Elapsed time must be a non-negative number"}), 400
+
+        if category not in ["Low", "Moderate", "High"]:
+            return jsonify({"status": "error", "message": "Invalid category"}), 400
 
         # Insert quiz result into the database
         query = """
-            INSERT INTO quiz_results (user_id, quiz_title, score, total_questions, category, result_level, elapsed_time, timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            INSERT INTO quiz_results (user_id, quiz_title, score, total_questions, category, result_level, elapsed_time, liked, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
         """
-        cursor.execute(query, (user_id, quiz_title, score, total_questions, category, result_level, elapsed_time))
+        cursor.execute(query, (user_id, quiz_title, score, total_questions, quiz_type, category, elapsed_time, False))
         db.commit()
 
         quiz_result_id = cursor.lastrowid
@@ -1541,13 +1560,12 @@ def save_quiz_result():
 def get_quiz_history():
     print("📜 Get-quiz-history endpoint called")
     try:
-        user_id = get_jwt_identity()
-        user_id = int(user_id)
+        user_id = int(get_jwt_identity())
         db = get_db_connection()
         cursor = db.cursor(dictionary=True)
 
         query = """
-            SELECT id, quiz_title, score, total_questions, category, result_level, elapsed_time, timestamp
+            SELECT id, quiz_title, score, total_questions, category, result_level, elapsed_time, liked, timestamp
             FROM quiz_results
             WHERE user_id = %s
             ORDER BY timestamp DESC
@@ -1558,12 +1576,13 @@ def get_quiz_history():
         quiz_history = [
             {
                 "id": result["id"],
+                "quizType": result["category"],  # Maps to quiz_type (e.g., "anxiety")
                 "quiz_title": result["quiz_title"],
                 "score": result["score"],
                 "total_questions": result["total_questions"],
-                "category": result["category"],
-                "result_level": result["result_level"],
-                "elapsed_time": result["elapsed_time"],  # Include elapsed time
+                "category": result["result_level"],  # Maps to Low/Moderate/High
+                "elapsedTime": result["elapsed_time"],
+                "liked": result["liked"],
                 "timestamp": str(result["timestamp"])
             }
             for result in quiz_results
@@ -1583,7 +1602,6 @@ def get_quiz_history():
     except Exception as e:
         print("🔥 ERROR in get_quiz_history:", str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
-
 
 
 # API to Get Mini-Game Suggestions Based on Mood
