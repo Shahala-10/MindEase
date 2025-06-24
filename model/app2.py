@@ -24,7 +24,7 @@ from tensorflow.keras.models import load_model
 from keras.models import load_model
 from PIL import Image
 import cv2
-
+from flask import send_file
 
 
 model = load_model(r'C:\Users\DELL\mindease-backend\model\best_model.h5')
@@ -582,6 +582,37 @@ def profile():
         print("DB error:", e)
         return jsonify({"msg": str(e)}), 500
 
+# API to Get User
+@app.route('/get_user', methods=['GET'])
+@jwt_required()
+def get_user():
+    print("🔍 Get user endpoint called")
+    try:
+        user_id = get_jwt_identity()
+        user_id = int(user_id)
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        cursor.execute("SELECT full_name FROM user WHERE id = %s", (user_id,))
+        user = cursor.fetchone()
+        if not user:
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "full_name": user[0]
+            }
+        })
+
+    except Exception as e:
+        print("🔥 ERROR in get_user:", str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 
 # API to Clear Chats
 @app.route("/clear_chats/<session_id>", methods=["DELETE"])
@@ -926,30 +957,30 @@ def submit_feedback():
 def analyze_message():
     print("🔍 Analyze endpoint called")
     try:
-        user_id = get_jwt_identity()
-        user_id = int(user_id)
+        user_id = int(get_jwt_identity())
         db = get_db_connection()
         cursor = db.cursor()
 
         session_id = None
         user_message = ""
         conversation_history = []
-        language = 'en-US'  # Default language
+        language = 'en-US'
         audio_blob = request.files.get('audio')
+        audio_file_path = None
 
         if audio_blob:
             print("Audio input detected")
             data = request.form
             session_id = data.get("session_id")
             conversation_history = json.loads(data.get("conversation_history", "[]"))
-            language = data.get("language", "en-US")  # Get language from frontend
+            language = data.get("language", "en-US")
         else:
             print("Text input detected")
             data = request.json or {}
             session_id = data.get("session_id")
             user_message = data.get("message", "").strip()
             conversation_history = data.get("conversation_history", [])
-            language = data.get("language", "en-US")  # Get language from frontend
+            language = data.get("language", "en-US")
 
         if not session_id:
             print("🔥 Error: Session ID is required")
@@ -977,19 +1008,19 @@ def analyze_message():
             audio_size = audio_data.tell()
             print(f"Audio blob size: {audio_size} bytes")
             if audio_size < 100:
-                print("🔥 Error: Audio blob is too small or empty")
                 user_message = "[Voice input: Invalid audio]"
-                bot_response = "I’m sorry, your voice message seems to be empty or too short. Could you try recording again for a few seconds, or type your message instead?"
+                bot_response = "I’m sorry, your voice message seems too short."
                 return jsonify({
                     "status": "success",
                     "data": {
                         "chat_id": 0,
-                        "message": "Voice message sent 🎙️",
-                        "transcribed_text": user_message,
+                        "message": user_message,
+                        "transcribed_text": None,
                         "response": bot_response,
                         "mood_label": mood_label,
                         "self_help": [{"title": "No resources available at the moment.", "link": "#"}],
-                        "mood_tracked": False
+                        "mood_tracked": False,
+                        "alert_triggered": False
                     }
                 }), 200
 
@@ -997,72 +1028,84 @@ def analyze_message():
                 audio_data.seek(0)
                 audio_samples, sr = librosa.load(audio_data, sr=16000, mono=True)
                 audio_duration = len(audio_samples) / sr
-                print(f"Audio loaded: duration={audio_duration:.2f}s, sample_rate={sr}, samples={len(audio_samples)}")
-                if len(audio_samples) == 0:
-                    raise ValueError("Audio samples are empty")
+                if audio_duration < 1.0:  # Minimum 1 second
+                    user_message = "[Voice input: Audio too short]"
+                    bot_response = "Your voice message is too short to process."
+                    return jsonify({
+                        "status": "success",
+                        "data": {
+                            "chat_id": 0,
+                            "message": user_message,
+                            "transcribed_text": None,
+                            "response": bot_response,
+                            "mood_label": mood_label,
+                            "self_help": [{"title": "No resources available at the moment.", "link": "#"}],
+                            "mood_tracked": False,
+                            "alert_triggered": False
+                        }
+                    }), 200
             except Exception as e:
-                print(f"🔥 Error loading audio with librosa: {str(e)}")
+                print(f"🔥 Error loading audio: {str(e)}")
                 user_message = "[Voice input: Unable to process audio]"
-                bot_response = "I’m sorry, I couldn’t process your voice message due to an audio issue. Could you try recording again or typing your message instead?"
+                bot_response = "I’m sorry, I couldn’t process your voice message."
                 return jsonify({
                     "status": "success",
                     "data": {
                         "chat_id": 0,
-                        "message": "Voice message sent 🎙️",
-                        "transcribed_text": user_message,
+                        "message": user_message,
+                        "transcribed_text": None,
                         "response": bot_response,
                         "mood_label": mood_label,
                         "self_help": [{"title": "No resources available at the moment.", "link": "#"}],
-                        "mood_tracked": False
+                        "mood_tracked": False,
+                        "alert_triggered": False
                     }
                 }), 200
 
-            temp_file = save_audio(audio_samples, "temp_audio.wav")
-            if not temp_file:
-                print("🔥 Error: Failed to save audio file")
+            # Save audio with a unique filename
+            audio_file_path = save_audio(audio_samples)
+            if not audio_file_path:
                 user_message = "[Voice input: Unable to process audio]"
-                bot_response = "I’m sorry, I couldn’t process your voice message due to an issue saving the audio. Could you try recording again or typing your message instead?"
+                bot_response = "Issue saving the audio file."
                 return jsonify({
                     "status": "success",
                     "data": {
                         "chat_id": 0,
-                        "message": "Voice message sent 🎙️",
-                        "transcribed_text": user_message,
+                        "message": user_message,
+                        "transcribed_text": None,
                         "response": bot_response,
                         "mood_label": mood_label,
                         "self_help": [{"title": "No resources available at the moment.", "link": "#"}],
-                        "mood_tracked": False
+                        "mood_tracked": False,
+                        "alert_triggered": False
                     }
                 }), 200
 
             try:
-                transcription = transcribe_audio_to_text(temp_file, language=language, max_attempts=2)
-                user_message = transcription if "[Transcription" not in transcription else "[Voice input: Unable to transcribe]"
+                transcription = transcribe_audio_to_text(audio_file_path, language=language, max_attempts=2)
+                user_message = transcription if "[Transcription" not in transcription and "[Voice input" not in transcription else "[Voice input: Unable to transcribe]"
                 print(f"Final user message: {user_message}")
-                if "[Transcription" in transcription:
-                    bot_response = "I’m sorry, I couldn’t understand your voice message this time. Could you try speaking clearly or typing your message instead?"
+                if "[Transcription" in transcription or "[Voice input" in transcription:
+                    bot_response = "I couldn’t understand your voice message clearly."
             except Exception as e:
-                print(f"🔥 Error during transcription: {str(e)}")
+                print(f"🔥 Error in transcription: {str(e)}")
                 user_message = "[Voice input: Transcription error]"
-                bot_response = "I’m sorry, there was an issue transcribing your voice message. Could you try speaking clearly or typing your message instead?"
+                bot_response = "Error during transcription."
                 return jsonify({
                     "status": "success",
                     "data": {
                         "chat_id": 0,
-                        "message": "Voice message sent 🎙️",
-                        "transcribed_text": user_message,
+                        "message": user_message,
+                        "transcribed_text": None,
                         "response": bot_response,
                         "mood_label": mood_label,
                         "self_help": [{"title": "No resources available at the moment.", "link": "#"}],
-                        "mood_tracked": False
+                        "mood_tracked": False,
+                        "alert_triggered": False
                     }
                 }), 200
 
-            if temp_file and os.path.exists(temp_file):
-                os.remove(temp_file)
-                print("Temporary audio file removed")
-
-        # Check for distress keywords and phrases in the user message
+        # Check for distress keywords and phrases
         if "[Transcription" not in user_message and "[Voice input" not in user_message:
             message_lower = user_message.lower()
             for keyword in DISTRESS_KEYWORDS:
@@ -1082,32 +1125,28 @@ def analyze_message():
 
                 print(f"VADER compound: {vader_compound}, Emotion label: {emotion_label}, Emotion score: {emotion_score}")
 
-                # Check for severe distress based on sentiment and emotion thresholds
-                if not trigger_alert:  # Only check if keywords didn't already trigger
+                if not trigger_alert:
                     if vader_compound < -0.8 and emotion_label in ["sadness", "fear"] and emotion_score > 0.9:
                         trigger_alert = True
                         print("⚠️ Severe emotional distress detected based on sentiment and emotion scores")
 
-                # Updated mood classification logic to prioritize greetings, "tired", "happy", and "excited"
+                # Mood classification logic
                 message_lower = user_message.lower()
                 greetings = ["hi", "hello", "hey"]
-                if any(greeting in message_lower for greeting in greetings):  # Explicitly check for greetings
+                if any(greeting in message_lower for greeting in greetings):
                     mood_label = "Neutral 🙂"
                     print("Explicitly detected a greeting in message, setting mood to Neutral 🙂")
-                elif "tired" in message_lower:  # Explicitly check for "tired" keyword
+                elif "tired" in message_lower:
                     mood_label = "Tired 😴"
                     print("Explicitly detected 'tired' in message, setting mood to Tired 😴")
-                elif "happy" in message_lower:  # Explicitly check for "happy" keyword
+                elif "happy" in message_lower:
                     mood_label = "Happy 😊"
                     print("Explicitly detected 'happy' in message, setting mood to Happy 😊")
-                elif "excited" in message_lower:  # Explicitly check for "excited" keyword
+                elif "excited" in message_lower:
                     mood_label = "Excited 🎉"
                     print("Explicitly detected 'excited' in message, setting mood to Excited 🎉")
                 elif emotion_label == "joy":
-                    if vader_compound >= 0.5 and emotion_score > 0.9:
-                        mood_label = "Excited 🎉"
-                    else:
-                        mood_label = "Happy 😊"
+                    mood_label = "Excited 🎉" if vader_compound >= 0.5 and emotion_score > 0.9 else "Happy 😊"
                 elif emotion_label == "sadness":
                     if vader_compound < -0.5:
                         mood_label = "Sad 😔"
@@ -1116,20 +1155,12 @@ def analyze_message():
                     else:
                         mood_label = "Sad 😔"
                 elif emotion_label == "anger":
-                    if vader_compound <= -0.5 and emotion_score > 0.9:
-                        mood_label = "Angry 😡"
-                    else:
-                        mood_label = "Stressed 😟"
+                    mood_label = "Angry 😡" if vader_compound <= -0.5 and emotion_score > 0.9 else "Stressed 😟"
                 elif emotion_label == "fear" or emotion_label == "disgust":
-                    if emotion_score > 0.8:
-                        mood_label = "Stressed 😟"
-                    else:
-                        if -0.1 < vader_compound < 0.3:
-                            mood_label = "Neutral 🙂"
-                        elif vader_compound <= -0.1:
-                            mood_label = "Tired 😴" if -0.5 <= vader_compound <= -0.1 and emotion_score <= 0.7 else "Sad 😔"
-                        else:
-                            mood_label = "Happy 😊"
+                    mood_label = "Stressed 😟" if emotion_score > 0.8 else (
+                        "Neutral 🙂" if -0.1 < vader_compound < 0.3 else
+                        "Tired 😴" if -0.5 <= vader_compound <= -0.1 and emotion_score <= 0.7 else "Sad 😔"
+                    )
                 elif emotion_label == "surprise":
                     mood_label = "Excited 🎉" if vader_compound >= 0.3 else "Neutral 🙂"
                 else:
@@ -1148,7 +1179,7 @@ def analyze_message():
 
         print(f"Detected emotion: {mood_label}")
 
-        # Trigger emergency alert if distress keywords or severe sentiment are detected
+        # Trigger emergency alert if distress detected
         if trigger_alert:
             print(f"⚠️ Triggering emergency alert due to distress detection in message: {user_message}")
             send_emergency_alert(user_id, session_id, "Distress", user_message)
@@ -1190,22 +1221,23 @@ def analyze_message():
             resources = cursor.fetchall()
             self_help = [{"title": res[0], "link": res[1]} for res in resources] or [{"title": "No resources available at the moment.", "link": "#"}]
         except Exception as e:
-            print(f"�fire Error fetching self-help resources: {str(e)}")
+            print(f"🔥 Error fetching self-help resources: {str(e)}")
             self_help = [{"title": "No resources available at the moment.", "link": "#"}]
 
         # Store chat data
         try:
             cursor.execute("""
-                INSERT INTO chat (user_id, session_id, message, response, vader_score, bert_label, bert_score, timestamp)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
-            """, (user_id, session_id, user_message, bot_response, 
-                  vader_result.get('compound', 0.0), 
-                  emotion_result.get('label', 'neutral'), 
-                  emotion_result.get('score', 0.0)))
+                INSERT INTO chat (user_id, session_id, message, response, vader_score, bert_label, bert_score, audio_file_path, timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            """, (user_id, session_id, user_message, bot_response,
+                  vader_result.get('compound', 0.0),
+                  emotion_result.get('label', 'neutral'),
+                  emotion_result.get('score', 0.0),
+                  audio_file_path))
+            chat_id = cursor.lastrowid
         except Exception as e:
             print(f"🔥 Error storing chat data: {str(e)}")
-            bot_response = "I’m sorry, I couldn’t save our chat due to a database issue. Let’s try again—what’s on your mind?" if language == 'en-US' else "ക്ഷമിക്കണം, ഡാറ്റാബേസ് പ്രശ്നം കാരണം ഞങ്ങളുടെ ചാറ്റ് സേവ് ചെയ്യാൻ കഴിഞ്ഞില്ല. വീണ്ടും ശ്രമിക്കാം—നിന്റെ മനസ്സിൽ എന്താണ്?"
-            mood_label = "Neutral 🙂"
+            chat_id = 0
 
         # Store mood data
         try:
@@ -1226,7 +1258,7 @@ def analyze_message():
         return jsonify({
             "status": "success",
             "data": {
-                "chat_id": cursor.lastrowid if 'cursor' in locals() else 0,
+                "chat_id": chat_id,
                 "message": "Voice message sent 🎙️" if audio_blob else user_message,
                 "transcribed_text": user_message if audio_blob and "[Transcription" not in user_message and "[Voice input" not in user_message else None,
                 "response": bot_response,
@@ -1248,55 +1280,68 @@ def analyze_message():
                 "chat_id": 0,
                 "message": "Voice message sent 🎙️" if 'audio_blob' in locals() and audio_blob else user_message if 'user_message' in locals() else "[Voice input: Unable to process]",
                 "transcribed_text": user_message if 'user_message' in locals() and "[Transcription" not in user_message and "[Voice input" not in user_message else None,
-                "response": "I’m sorry, something went wrong while processing your message. I’m still here for you—let’s try again. What’s on your mind?" if language == 'en-US' else "ക്ഷമിക്കണം, നിന്റെ സന്ദേശം പ്രോസസ്സ് ചെയ്യുന്നതിനിടയിൽ എന്തോ കുഴപ്പം സംഭവിച്ചു. ഞാൻ ഇപ്പോഴും ഇവിടെ ഉണ്ട്—വീണ്ടും ശ്രമിക്കാം. നിന്റെ മനസ്സിൽ എന്താണ്?",
+                "response": "I’m sorry, something went wrong...",
                 "mood_label": "Neutral 🙂",
                 "self_help": [{"title": "No resources available at the moment.", "link": "#"}],
                 "mood_tracked": False,
                 "alert_triggered": False
             }
         }), 200
-
-# API to Fetch Chat History by Session
-@app.route("/get_chats/<int:session_id>", methods=["GET"])
+        
+# API to Fetch All Chat History for a User (Across All Sessions)
+@app.route('/get_all_chats', methods=['GET'])
 @jwt_required()
-def get_chats(session_id):
-    print("💬 Get-chats endpoint called for session_id:", session_id)
+def get_all_chats():
     try:
-        user_id = get_jwt_identity()
-        user_id = int(user_id)
+        user_id = int(get_jwt_identity())
         db = get_db_connection()
         cursor = db.cursor()
-
-        cursor.execute("SELECT user_id FROM session WHERE id = %s", (session_id,))
-        session = cursor.fetchone()
-        print("Session user_id from DB:", session[0] if session else "None")
-        if not session or session[0] != user_id:
-            return jsonify({"status": "error", "message": "Unauthorized or session not found"}), 403
-
-        query = "SELECT id, message, response, timestamp FROM chat WHERE session_id = %s ORDER BY timestamp DESC"
-        cursor.execute(query, (session_id,))
+        cursor.execute("""
+            SELECT chat.id AS chat_id, chat.session_id, 
+                   chat.message, chat.response, chat.timestamp, chat.audio_file_path
+            FROM chat
+            LEFT JOIN session ON chat.session_id = session.id
+            WHERE chat.user_id = %s
+            ORDER BY chat.timestamp DESC
+        """, (user_id,))
         chats = cursor.fetchall()
-
-        chat_list = [
+        cursor.close()
+        db.close()
+        
+        chats_list = [
             {
                 "chat_id": chat[0],
-                "message": chat[1],
-                "response": chat[2],
-                "timestamp": str(chat[3])
+                "session_id": chat[1],
+                "message": chat[2],
+                "response": chat[3],
+                "timestamp": chat[4].isoformat(),
+                "audio_file_path": chat[5]
             }
             for chat in chats
         ]
-
-        cursor.close()
-        db.close()
-
-        return jsonify({"status": "success", "data": {"chats": chat_list}})
-
+        
+        return jsonify({"status": "success", "data": {"chats": chats_list}})
     except Exception as e:
-        print("🔥 ERROR in get_chats:", str(e))
+        print(f"Error in get_all_chats: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# API to Fetch All Chat History for a User (Across All Sessions)
+@app.route('/audio/<int:chat_id>', methods=['GET'])
+@jwt_required()
+def serve_audio(chat_id):
+    user_id = int(get_jwt_identity())
+    db = get_db_connection()
+    cursor = db.cursor()
+    cursor.execute("SELECT audio_file_path FROM chat WHERE id = %s AND user_id = %s", (chat_id, user_id))
+    result = cursor.fetchone()
+    cursor.close()
+    db.close()
+    if not result or not result[0]:
+        return jsonify({"status": "error", "message": "Audio file not found"}), 404
+    audio_path = result[0]
+    if not os.path.exists(audio_path):
+        return jsonify({"status": "error", "message": "Audio file not found on server"}), 404
+    return send_file(audio_path, mimetype='audio/wav')
+
 @app.route('/get_user_chat_history', methods=['GET'])
 @jwt_required()
 def get_user_chat_history():
@@ -2060,6 +2105,422 @@ def analyze_image():
             cursor.close()
             db.close()
         return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/admin/users/<int:user_id>/emergency_contacts', methods=['GET'])
+@jwt_required()
+def admin_get_emergency_contacts(user_id):
+    print(f"📞 Admin get-emergency-contacts endpoint called for user_id: {user_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        # Verify user exists
+        cursor.execute("SELECT id FROM user WHERE id = %s", (user_id,))
+        if not cursor.fetchone():
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        query = """
+            SELECT id, contact_name, phone_number, email, relationship, created_at
+            FROM emergency_contact
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+        """
+        cursor.execute(query, (user_id,))
+        contacts = cursor.fetchall()
+
+        contact_list = [
+            {
+                "id": contact["id"],
+                "contact_name": contact["contact_name"],
+                "phone_number": contact["phone_number"],
+                "email": contact["email"],
+                "relationship": contact["relationship"],
+                "created_at": str(contact["created_at"])
+            }
+            for contact in contacts
+        ]
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "user_id": user_id,
+                "contacts": contact_list
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_get_emergency_contacts: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/admin/users/<int:user_id>/emergency_contacts', methods=['POST'])
+@jwt_required()
+def admin_add_emergency_contact(user_id):
+    print(f"➕ Admin add-emergency-contact endpoint called for user_id: {user_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        # Verify user exists
+        cursor.execute("SELECT id FROM user WHERE id = %s", (user_id,))
+        if not cursor.fetchone():
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        data = request.get_json()
+        contact_name = data.get("contact_name", "").strip()
+        phone_number = data.get("phone_number", "").strip()
+        email = data.get("email", "").strip()
+        relationship = data.get("relationship", "").strip()
+
+        # Validate required fields
+        if not contact_name:
+            return jsonify({"status": "error", "message": "Contact name cannot be empty"}), 400
+        if len(contact_name) > 100:
+            return jsonify({"status": "error", "message": "Contact name must be 100 characters or less"}), 400
+
+        if not phone_number or not re.match(r"^[0-9]{10,15}$", phone_number):
+            return jsonify({"status": "error", "message": "Phone number must be 10-15 digits"}), 400
+
+        if email and not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
+            return jsonify({"status": "error", "message": "Invalid email format"}), 400
+
+        allowed_relationships = ['Family', 'Friend', 'Guardian', 'Other']
+        if not relationship or relationship not in allowed_relationships:
+            return jsonify({"status": "error", "message": "Relationship must be one of: Family, Friend, Guardian, Other"}), 400
+
+        # Check maximum contacts limit (e.g., 5)
+        cursor.execute("SELECT COUNT(*) FROM emergency_contact WHERE user_id = %s", (user_id,))
+        contact_count = cursor.fetchone()[0]
+        if contact_count >= 5:
+            return jsonify({"status": "error", "message": "Maximum number of emergency contacts reached (5)"}), 400
+
+        # Insert the emergency contact
+        query = """
+            INSERT INTO emergency_contact (user_id, contact_name, phone_number, email, relationship)
+            VALUES (%s, %s, %s, %s, %s)
+        """
+        cursor.execute(query, (user_id, contact_name, phone_number, email or None, relationship))
+        db.commit()
+
+        contact_id = cursor.lastrowid
+        cursor.close()
+        db.close()
+
+        print(f"✅ Emergency contact added for user_id: {user_id}, contact_id: {contact_id}")
+        return jsonify({
+            "status": "success",
+            "data": {
+                "contact_id": contact_id,
+                "message": "Emergency contact added successfully"
+            }
+        }), 201
+
+    except Exception as e:
+        print(f"🔥 Error in admin_add_emergency_contact: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/admin/users/<int:user_id>/emergency_contacts/<int:contact_id>', methods=['PUT'])
+@jwt_required()
+def admin_update_emergency_contact(user_id, contact_id):
+    print(f"📞 Admin update-emergency-contact endpoint called for user_id: {user_id}, contact_id: {contact_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        # Verify user exists
+        cursor.execute("SELECT id FROM user WHERE id = %s", (user_id,))
+        if not cursor.fetchone():
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        # Verify contact exists and belongs to the user
+        cursor.execute("SELECT user_id FROM emergency_contact WHERE id = %s", (contact_id,))
+        contact = cursor.fetchone()
+        if not contact or contact[0] != user_id:
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "Contact not found or does not belong to user"}), 404
+
+        data = request.get_json()
+        contact_name = data.get("contact_name", "").strip()
+        phone_number = data.get("phone_number", "").strip()
+        email = data.get("email", "").strip()
+        relationship = data.get("relationship", "").strip()
+
+        # Validate required fields
+        if not contact_name:
+            return jsonify({"status": "error", "message": "Contact name cannot be empty"}), 400
+        if len(contact_name) > 100:
+            return jsonify({"status": "error", "message": "Contact name must be 100 characters or less"}), 400
+
+        if not phone_number or not re.match(r"^[0-9]{10,15}$", phone_number):
+            return jsonify({"status": "error", "message": "Phone number must be 10-15 digits"}), 400
+
+        if email and not re.match(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$", email):
+            return jsonify({"status": "error", "message": "Invalid email format"}), 400
+
+        allowed_relationships = ['Family', 'Friend', 'Guardian', 'Other']
+        if not relationship or relationship not in allowed_relationships:
+            return jsonify({"status": "error", "message": "Relationship must be one of: Family, Friend, Guardian, Other"}), 400
+
+        # Update the emergency contact
+        query = """
+            UPDATE emergency_contact
+            SET contact_name = %s, phone_number = %s, email = %s, relationship = %s
+            WHERE id = %s AND user_id = %s
+        """
+        cursor.execute(query, (contact_name, phone_number, email or None, relationship, contact_id, user_id))
+        db.commit()
+
+        if cursor.rowcount == 0:
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "No changes made to the contact"}), 400
+
+        cursor.close()
+        db.close()
+
+        print(f"✅ Emergency contact updated for user_id: {user_id}, contact_id: {contact_id}")
+        return jsonify({
+            "status": "success",
+            "data": {
+                "contact_id": contact_id,
+                "message": "Emergency contact updated successfully"
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_update_emergency_contact: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
+@app.route('/admin/users/<int:user_id>/emergency_contacts/<int:contact_id>', methods=['DELETE'])
+@jwt_required()
+def admin_delete_emergency_contact(user_id, contact_id):
+    print(f"🗑️ Admin delete-emergency-contact endpoint called for user_id: {user_id}, contact_id: {contact_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        # Verify user exists
+        cursor.execute("SELECT id FROM user WHERE id = %s", (user_id,))
+        if not cursor.fetchone():
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        # Verify contact exists and belongs to the user
+        cursor.execute("SELECT user_id FROM emergency_contact WHERE id = %s", (contact_id,))
+        contact = cursor.fetchone()
+        if not contact or contact[0] != user_id:
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "Contact not found or does not belong to user"}), 404
+
+        # Delete the emergency contact
+        cursor.execute("DELETE FROM emergency_contact WHERE id = %s AND user_id = %s", (contact_id, user_id))
+        db.commit()
+
+        if cursor.rowcount == 0:
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "No contact was deleted"}), 400
+
+        cursor.close()
+        db.close()
+
+        print(f"✅ Emergency contact deleted for user_id: {user_id}, contact_id: {contact_id}")
+        return jsonify({
+            "status": "success",
+            "message": f"Emergency contact {contact_id} deleted successfully"
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_delete_emergency_contact: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/admin/users/<int:user_id>/emergency_alerts', methods=['GET'])
+@jwt_required()
+def admin_get_user_emergency_alerts(user_id):
+    print(f"🚨 Admin get-user-emergency-alerts endpoint called for user_id: {user_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        # Verify user exists
+        cursor.execute("SELECT id FROM user WHERE id = %s", (user_id,))
+        if not cursor.fetchone():
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        query = """
+            SELECT id, session_id, message, timestamp, status
+            FROM emergency_alert
+            WHERE user_id = %s
+            ORDER BY timestamp DESC
+        """
+        cursor.execute(query, (user_id,))
+        alerts = cursor.fetchall()
+
+        alert_list = [
+            {
+                "id": alert["id"],
+                "session_id": alert["session_id"],
+                "message": alert["message"],
+                "timestamp": str(alert["timestamp"]),
+                "status": alert["status"]
+            }
+            for alert in alerts
+        ]
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "user_id": user_id,
+                "alerts": alert_list
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_get_user_emergency_alerts: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/admin/emergency_alerts', methods=['GET'])
+@jwt_required()
+def admin_get_all_emergency_alerts():
+    print("🚨 Admin get-all-emergency-alerts endpoint called")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor(dictionary=True)
+
+        query = """
+            SELECT ea.id, ea.user_id, u.full_name AS user_name, ea.session_id, ea.message, ea.timestamp, ea.status
+            FROM emergency_alert ea
+            JOIN user u ON ea.user_id = u.id
+            ORDER BY ea.timestamp DESC
+        """
+        cursor.execute(query)
+        alerts = cursor.fetchall()
+
+        alert_list = [
+            {
+                "id": alert["id"],
+                "user_id": alert["user_id"],
+                "user_name": alert["user_name"],
+                "session_id": alert["session_id"],
+                "message": alert["message"],
+                "timestamp": str(alert["timestamp"]),
+                "status": alert["status"]
+            }
+            for alert in alerts
+        ]
+
+        cursor.close()
+        db.close()
+
+        return jsonify({
+            "status": "success",
+            "data": {
+                "alerts": alert_list
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_get_all_emergency_alerts: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/admin/emergency_alerts/<int:alert_id>', methods=['PUT'])
+@jwt_required()
+def admin_update_emergency_alert(alert_id):
+    print(f"🚨 Admin update-emergency-alert endpoint called for alert_id: {alert_id}")
+    try:
+        admin_id = get_jwt_identity()
+        if not is_admin_user(admin_id):
+            return jsonify({"status": "error", "message": "Unauthorized: Admin access required"}), 403
+
+        db = get_db_connection()
+        cursor = db.cursor()
+
+        data = request.get_json()
+        new_status = data.get("status", "").strip()
+
+        if new_status not in ['triggered', 'resolved']:
+            return jsonify({"status": "error", "message": "Status must be 'triggered' or 'resolved'"}), 400
+
+        # Verify alert exists
+        cursor.execute("SELECT id FROM emergency_alert WHERE id = %s", (alert_id,))
+        if not cursor.fetchone():
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "Alert not found"}), 404
+
+        # Update alert status
+        cursor.execute(
+            "UPDATE emergency_alert SET status = %s WHERE id = %s",
+            (new_status, alert_id)
+        )
+        db.commit()
+
+        if cursor.rowcount == 0:
+            cursor.close()
+            db.close()
+            return jsonify({"status": "error", "message": "No changes made to the alert"}), 400
+
+        cursor.close()
+        db.close()
+
+        print(f"✅ Emergency alert status updated for alert_id: {alert_id}")
+        return jsonify({
+            "status": "success",
+            "data": {
+                "alert_id": alert_id,
+                "message": f"Emergency alert status updated to {new_status}"
+            }
+        })
+
+    except Exception as e:
+        print(f"🔥 Error in admin_update_emergency_alert: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
