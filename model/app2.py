@@ -25,6 +25,7 @@ from keras.models import load_model
 from PIL import Image
 import cv2
 from flask import send_file
+import uuid
 
 
 model = load_model(r'C:\Users\DELL\mindease-backend\model\best_model.h5')
@@ -125,17 +126,45 @@ analyzer.lexicon.update({
 emotion_pipeline = pipeline("text-classification", model="bhadresh-savani/distilbert-base-uncased-emotion")
 
 # Audio Processing Functions
-def save_audio(audio_samples, temp_file="temp_audio.wav"):
+# def save_audio(audio_samples, temp_file="temp_audio.wav"):
+#     try:
+#         print("Saving audio file...")
+#         # Ensure audio_samples is a NumPy array
+#         audio_samples = np.array(audio_samples, dtype=np.float32)
+#         # Normalize audio samples to prevent clipping
+#         if np.max(np.abs(audio_samples)) > 0:
+#             audio_samples = audio_samples / np.max(np.abs(audio_samples))
+#         sf.write(temp_file, audio_samples, 16000)
+#         print(f"Audio saved to {temp_file}")
+#         return temp_file
+#     except Exception as e:
+#         print(f"Error in save_audio: {str(e)}")
+#         return None
+
+def save_audio(audio_samples, directory="audio/", filename=None):
     try:
         print("Saving audio file...")
+        os.makedirs(directory, exist_ok=True)
+
         # Ensure audio_samples is a NumPy array
         audio_samples = np.array(audio_samples, dtype=np.float32)
+
         # Normalize audio samples to prevent clipping
         if np.max(np.abs(audio_samples)) > 0:
             audio_samples = audio_samples / np.max(np.abs(audio_samples))
-        sf.write(temp_file, audio_samples, 16000)
-        print(f"Audio saved to {temp_file}")
-        return temp_file
+
+        # Generate unique filename if not provided
+        if not filename:
+            import uuid
+            filename = f"audio_{uuid.uuid4().hex}.wav"
+
+        file_path = os.path.join(directory, filename)
+
+        # Save the audio
+        sf.write(file_path, audio_samples, 16000)
+        print(f"Audio saved to {file_path}")
+
+        return file_path
     except Exception as e:
         print(f"Error in save_audio: {str(e)}")
         return None
@@ -1063,7 +1092,8 @@ def analyze_message():
                 }), 200
 
             # Save audio with a unique filename
-            audio_file_path = save_audio(audio_samples)
+            unique_filename = f"audio_{uuid.uuid4().hex}.wav"
+            audio_file_path = save_audio(audio_samples, "audio/", unique_filename)
             if not audio_file_path:
                 user_message = "[Voice input: Unable to process audio]"
                 bot_response = "Issue saving the audio file."
